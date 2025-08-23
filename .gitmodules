@@ -1,0 +1,12 @@
+[submodule "external/fmt"]
+	path = external/fmt
+	url = git@github.com:fmtlib/fmt.git
+[submodule "external/spdlog"]
+	path = external/spdlog
+	url = git@github.com:gabime/spdlog.git
+[submodule "tests/CLI11"]
+	path = tests/CLI11
+	url = git@github.com:CLIUtils/CLI11.git
+[submodule "tests/Catch2"]
+	path = tests/Catch2
+	url = git@github.com:catchorg/Catch2.git
