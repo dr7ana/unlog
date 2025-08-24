@@ -71,7 +71,11 @@ target_compile_features(unlog PUBLIC cxx_std_23)
 
 add_subdirectory(external)
 
-target_link_libraries(unlog PUBLIC fmt::fmt)
+target_link_libraries(unlog 
+    PUBLIC 
+    fmt::fmt
+    spdlog::spdlog_header_only
+)
 
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

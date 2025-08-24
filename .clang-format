@@ -32,13 +32,13 @@ PenaltyBreakString: '3'
 # bracing
 BraceWrapping:
   AfterCaseLabel: true
-  AfterClass: true
+  AfterClass: false
   AfterControlStatement: Never
   AfterEnum: false
   AfterExternBlock: false
   AfterFunction: false
-  AfterNamespace: true
-  AfterStruct: true
+  AfterNamespace: false
+  AfterStruct: false
   AfterUnion: false
   BeforeCatch: false
   BeforeElse: true

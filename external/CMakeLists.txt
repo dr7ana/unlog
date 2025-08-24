@@ -15,3 +15,4 @@ add_subdirectory(fmt)
 set(SPDLOG_BUILD_PIC ON CACHE BOOL "" FORCE)
 set(SPDLOG_FMT_EXTERNAL_HO ON CACHE BOOL "" FORCE)
 add_subdirectory(spdlog)
+
