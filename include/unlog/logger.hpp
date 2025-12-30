@@ -60,8 +60,6 @@ namespace un::log {
 
         void set_default_level(LogLevel level);
 
-        void reset_level(LogLevel level);
-
         void add_sink(sink_ptr sink);
 
         void add_sink(const Config& conf, sink_ptr sink);

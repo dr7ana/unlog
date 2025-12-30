@@ -1,4 +1,5 @@
 #include "unlog.hpp"
+
 #include "unlog/logger.hpp"
 
 namespace un::log {
@@ -22,14 +23,15 @@ namespace un::log {
             using namespace std::literals;
             auto elapsed = std::chrono::steady_clock::now() - started_at;
 
-            dest.append(fmt::format(
-                    elapsed >= 1h     ? format_hours
-                    : elapsed >= 1min ? format_minutes
-                                      : format_seconds,
-                    std::chrono::duration_cast<std::chrono::hours>(elapsed).count(),
-                    (std::chrono::duration_cast<std::chrono::minutes>(elapsed) % 1h).count(),
-                    (std::chrono::duration_cast<std::chrono::seconds>(elapsed) % 1min).count(),
-                    (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed) % 1s).count()));
+            dest.append(
+                    fmt::format(
+                            elapsed >= 1h     ? format_hours
+                            : elapsed >= 1min ? format_minutes
+                                              : format_seconds,
+                            std::chrono::duration_cast<std::chrono::hours>(elapsed).count(),
+                            (std::chrono::duration_cast<std::chrono::minutes>(elapsed) % 1h).count(),
+                            (std::chrono::duration_cast<std::chrono::seconds>(elapsed) % 1min).count(),
+                            (std::chrono::duration_cast<std::chrono::milliseconds>(elapsed) % 1s).count()));
         }
 
         std::unique_ptr<custom_flag_formatter> clone() const override {

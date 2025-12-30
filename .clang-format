@@ -64,20 +64,20 @@ RemoveSemicolon: true
 SortIncludes: CaseInsensitive
 IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '".+\.h'
+  - Regex: '^"[^/]*.h(pp)?"$'
+    Priority: 1
+  - Regex: '^"unlog'
     Priority: 2
   - Regex: '^<unlog'
     Priority: 3
-  - Regex: '^<(fmt|spdlog)'
+  - Regex: '^"(fmt|spdlog|catch2)'
     Priority: 4
-  - Regex: '^<CLI'
+  - Regex: '^<(fmt|spdlog|catch2)'
     Priority: 5
-  - Regex: '^<catch2'
-    Priority: 6
   - Regex: '^<.*\.h(pp)?>$'
-    Priority: 7
+    Priority: 6
   - Regex: '(<)(.)+(>)'
-    Priority: 8
+    Priority: 7
 
 # spacing
 SpaceBeforeParens: ControlStatements

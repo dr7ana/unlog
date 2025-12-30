@@ -5,16 +5,14 @@ namespace un::log::test {
         unlog::info("test case beginning");
         REQUIRE(unlog::get_default_level() == LogLevel::info);
 
-        set_default_level(LogLevel::debug);
-        REQUIRE(unlog::get_default_level() == LogLevel::debug);
         unlog::info("test underway...");
         unlog::debug("shhh");  // will not print
 
-        reset_level(LogLevel::debug);
+        set_default_level(LogLevel::debug);
         REQUIRE(unlog::get_default_level() == LogLevel::debug);
         unlog::debug("almost done");
 
-        reset_level();
+        set_default_level();
         REQUIRE(unlog::get_default_level() == LogLevel::info);
         unlog::info("test case {} complete!", 1);
     }

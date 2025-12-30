@@ -2,9 +2,8 @@
 
 #include "unlog.hpp"
 
-#include <spdlog/sinks/ostream_sink.h>
-
 #include <catch2/catch_test_macros.hpp>
+#include <spdlog/sinks/ostream_sink.h>
 
 #include <ostream>
 
@@ -22,7 +21,7 @@ namespace un::log::test {
 
         static auto capture_test_logs(LogLevel level = get_default_level()) {
             reset();
-            reset_level(level);
+            set_default_level(level);
             detail::add_sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(stream));
         }
 

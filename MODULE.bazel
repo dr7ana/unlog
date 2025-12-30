@@ -1,0 +1,29 @@
+module(
+    name = "unlog",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "rules_cc", version = "0.2.14")
+bazel_dep(name = "toolchains_llvm", version = "1.6.0")
+bazel_dep(name = "fmt", version = "12.1.0")
+bazel_dep(name = "spdlog", version = "1.16.0.bcr.2")
+bazel_dep(name = "catch2", version = "3.11.0")
+
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+
+LLVM_VERSIONS = {
+    "": "21.1.8",
+}
+
+llvm.toolchain(
+    name = "llvm_toolchain",
+    cxx_standard = {"": "c++23"},
+    llvm_versions = LLVM_VERSIONS,
+)
+llvm.toolchain_root(
+    name = "llvm_toolchain",
+    path = "/usr/lib/llvm-21",
+)
+use_repo(llvm, "llvm_toolchain")
+
+register_toolchains("@llvm_toolchain//:all")

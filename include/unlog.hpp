@@ -165,11 +165,7 @@ namespace un::log {
     template <typename... Arg>
     log(fmt::format_string<Arg...>, LogLevel, Arg&&...) -> log<Arg...>;
 
-    inline void reset_level(LogLevel level = LogLevel::info) {
-        return detail::reset_level(level);
-    }
-
-    inline void set_default_level(LogLevel level) {
+    inline void set_default_level(LogLevel level = LogLevel::info) {
         return detail::set_default_level(level);
     }
 

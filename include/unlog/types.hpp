@@ -2,6 +2,8 @@
 
 #include "utils.hpp"
 
+#include <span>
+
 namespace un::log {
 
     template <typename T>

@@ -77,10 +77,6 @@ namespace un::log {
 
         void set_default_level(LogLevel level) {
             default_log_level() = level;
-        }
-
-        void reset_level(LogLevel level) {
-            set_default_level(level);
             default_logger()->set_level(level);
             for_each_sink([level](sink_ptr& sink) { sink->set_level(level); });
         }
