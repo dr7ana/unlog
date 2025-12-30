@@ -3,11 +3,15 @@
 #include "format.hpp"
 
 #include <bitset>
+#include <filesystem>
+#include <optional>
 
 namespace un::log {
 
     using namespace literals;
     using namespace std::literals;
+
+    namespace fs = std::filesystem;
 
     using LogLevel = spdlog::level::level_enum;
 
@@ -34,36 +38,60 @@ namespace un::log {
             - async (no vs yes)
     */
     struct Config {
-        cspan name;
+        std::string name;
         Type type;
         uint8_t flags;
         uint8_t threads;
         uint32_t pool_threads;
         std::optional<std::string> format{std::nullopt};
-        std::optional<std::string> filename{std::nullopt};
+        std::optional<fs::path> filename{std::nullopt};
 
         Config() = delete;
 
-        constexpr Config(cspan _name, Type _type, uint8_t _flags, uint8_t _threads, uint8_t _pool_size) :
-                name{_name}, type{_type}, flags{_flags}, threads{_threads}, pool_threads{_pool_size} {
-            // File type must have filename, vice versa
-            if ((type == Type::File) != filename.has_value())
-                throw std::invalid_argument{"File logger must have filename, and vice versa"};
+        Config(std::string_view _name,
+               Type _type,
+               uint8_t _flags,
+               uint8_t _threads,
+               uint32_t _pool_size,
+               std::optional<std::string> _format = std::nullopt) :
+                name{_name.data(), _name.size()},
+                type{_type},
+                flags{_flags},
+                threads{_threads},
+                pool_threads{_pool_size},
+                format{std::move(_format)} {
+            if (type == Type::File)
+                throw std::invalid_argument{"File logger must have filename"};
         }
 
-        template <char_view_type T>
-        static constexpr Config make_default(T n = "unlog"_sp) {
-            return Config{std::move(n), Type::cout, Flags::color, 0, 0};
+        Config(std::string_view _name,
+               Type _type,
+               uint8_t _flags,
+               uint8_t _threads,
+               uint32_t _pool_size,
+               fs::path _filename,
+               std::optional<std::string> _format = std::nullopt) :
+                name{_name.data(), _name.size()},
+                type{_type},
+                flags{_flags},
+                threads{_threads},
+                pool_threads{_pool_size},
+                format{std::move(_format)},
+                filename{std::move(_filename)} {
+            if (type != Type::File)
+                throw std::invalid_argument{"File logger must use file type"};
+            if (filename->empty())
+                throw std::invalid_argument{"File logger must have a non-empty filename"};
         }
 
-        template <char_view_type T>
-        static constexpr Config make_async(T n = "unlog"_sp, uint8_t thread_count = 1, uint32_t pool_size = 8192) {
+        static Config make_default(std::string_view n = "unlog"sv) { return Config{n, Type::cout, Flags::color, 0, 0}; }
+
+        static Config make_async(std::string_view n = "unlog"sv, uint8_t thread_count = 1, uint32_t pool_size = 8192) {
             return Config{n, Type::cout, Flags::color | Flags::threadsafe | Flags::async, thread_count, pool_size};
         }
 
-        template <char_view_type T>
-        static constexpr Config make_file(cspan file, T n = "unlog"_sp) {
-            return Config{n, Type::cout, Flags::color | Flags::threadsafe | Flags::async, 0, 0, file};
+        static Config make_file(const fs::path& file, std::string_view n = "unlog"sv) {
+            return Config{n, Type::File, Flags::threadsafe, 0, 0, file};
         }
 
         constexpr bool threadsafe() const { return flags & Flags::threadsafe; }
@@ -73,7 +101,7 @@ namespace un::log {
         constexpr bool cerr_log() const { return type == Type::cerr; }
         constexpr bool file_log() const { return type == Type::File && filename.has_value(); }
 
-        std::string file() const { return filename.value_or("INVALID"s); }
+        fs::path file() const { return filename.value_or(fs::path{"INVALID"}); }
 
         std::string to_string() const { return "Config[ name={} | type={} ]"_format(name, type_string(type)); }
 

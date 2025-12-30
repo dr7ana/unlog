@@ -30,7 +30,7 @@ namespace un::log {
         void initialize(const Config& conf);
 
       public:
-        explicit Logger(cspan name = "unlog"_sp);
+        explicit Logger(std::string_view name = "unlog"sv);
 
         void set_level(LogLevel level);
 

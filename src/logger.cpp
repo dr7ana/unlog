@@ -86,7 +86,7 @@ namespace un::log {
         return detail::get_global_logger();
     }
 
-    Logger::Logger(cspan name) :
+    Logger::Logger(std::string_view name) :
             config{Config::make_default(name)}, logger_name{config.name.data(), config.name.size()} {
         std::lock_guard lock{detail::loggers_mutex()};
         // hold a spot in the map for the logger by emplacing nullptr
