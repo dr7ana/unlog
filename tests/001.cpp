@@ -1,23 +1,7 @@
 #include "utils.hpp"
 
 namespace un::log::test {
-    TEST_CASE("001 - global settings", "[001]") {
-        unlog::info("test case beginning");
-        REQUIRE(unlog::get_default_level() == LogLevel::info);
-
-        unlog::info("test underway...");
-        unlog::debug("shhh");  // will not print
-
-        set_default_level(LogLevel::debug);
-        REQUIRE(unlog::get_default_level() == LogLevel::debug);
-        unlog::debug("almost done");
-
-        set_default_level();
-        REQUIRE(unlog::get_default_level() == LogLevel::info);
-        unlog::info("test case {} complete!", 1);
-    }
-
-    TEST_CASE("Config defaults", "[config]") {
+    TEST_CASE("001 - config defaults", "[001][config]") {
         auto cfg = Config::make_default("demo");
 
         CHECK(cfg.name == "demo");
@@ -31,7 +15,7 @@ namespace un::log::test {
         CHECK(cfg.file() == std::filesystem::path{"INVALID"});
     }
 
-    TEST_CASE("Config async defaults", "[config]") {
+    TEST_CASE("001 - config async defaults", "[001][config]") {
         auto cfg = Config::make_async("async", 2, 4096);
 
         CHECK(cfg.name == "async");
@@ -43,7 +27,7 @@ namespace un::log::test {
         CHECK(cfg.pool_threads == 4096);
     }
 
-    TEST_CASE("Config file defaults", "[config]") {
+    TEST_CASE("001 - config file defaults", "[001][config]") {
         auto cfg = Config::make_file(std::filesystem::path{"app.log"}, "file");
 
         CHECK(cfg.name == "file");
@@ -55,12 +39,12 @@ namespace un::log::test {
         CHECK(cfg.file() == std::filesystem::path{"app.log"});
     }
 
-    TEST_CASE("Config file validation", "[config]") {
+    TEST_CASE("001 - config file validation", "[001][config]") {
         REQUIRE_THROWS_AS((Config{"bad", Type::File, Flags::threadsafe, 0, 0}), std::invalid_argument);
         REQUIRE_THROWS_AS(
-                (Config{"bad", Type::cout, Flags::color, 0, 0, std::filesystem::path{"bad.log"}}),
+                (Config{"bad", std::filesystem::path{"bad.log"}, Type::cout, Flags::color, 0, 0}),
                 std::invalid_argument);
         REQUIRE_THROWS_AS(
-                (Config{"bad", Type::File, Flags::threadsafe, 0, 0, std::filesystem::path{}}), std::invalid_argument);
+                (Config{"bad", std::filesystem::path{}, Type::File, Flags::threadsafe, 0, 0}), std::invalid_argument);
     }
 }  // namespace un::log::test

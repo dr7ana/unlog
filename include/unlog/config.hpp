@@ -65,11 +65,11 @@ namespace un::log {
         }
 
         Config(std::string_view _name,
+               fs::path _filename,
                Type _type,
                uint8_t _flags,
                uint8_t _threads,
                uint32_t _pool_size,
-               fs::path _filename,
                std::optional<std::string> _format = std::nullopt) :
                 name{_name.data(), _name.size()},
                 type{_type},
@@ -91,7 +91,7 @@ namespace un::log {
         }
 
         static Config make_file(const fs::path& file, std::string_view n = "unlog"sv) {
-            return Config{n, Type::File, Flags::threadsafe, 0, 0, file};
+            return Config{n, file, Type::File, Flags::threadsafe, 0, 0};
         }
 
         constexpr bool threadsafe() const { return flags & Flags::threadsafe; }

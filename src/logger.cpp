@@ -80,17 +80,21 @@ namespace un::log {
             default_logger()->set_level(level);
             for_each_sink([level](sink_ptr& sink) { sink->set_level(level); });
         }
+
+        void make_logger(const Config& conf, bool make_default) {
+            default_logger()->make_logger(conf, make_default);
+        }
     }  // namespace detail
 
     const logger_ptr& global_logger() {
         return detail::get_global_logger();
     }
 
-    Logger::Logger(std::string_view name) :
-            config{Config::make_default(name)}, logger_name{config.name.data(), config.name.size()} {
-        std::lock_guard lock{detail::loggers_mutex()};
-        // hold a spot in the map for the logger by emplacing nullptr
-        detail::loggers()[logger_name];
+    Logger::Logger(std::string_view name) : config{Config::make_default(name)}, logger_name{config.name} {
+        make_logger(config, true);
+        // std::lock_guard lock{detail::loggers_mutex()};
+        // // hold a spot in the map for the logger by emplacing nullptr
+        // detail::loggers()[logger_name];
     }
 
     void Logger::get_logger() {
@@ -102,7 +106,7 @@ namespace un::log {
 
         if (!maybe_logger) {
             maybe_logger = std::make_shared<spdlog::logger>(logger_name, get_master_sink());
-            add_sink<spdlog::sinks::stdout_color_sink_mt>(config);
+            set_sinks<spdlog::sinks::stdout_color_sink_mt>(config);
         }
 
         logger = maybe_logger;
@@ -114,40 +118,64 @@ namespace un::log {
         return detail::add_sink(conf, sink);
     }
 
-    void Logger::initialize(const Config& conf) {
+    void Logger::set_sinks(const Config& conf, sink_ptr sink) {
+        return detail::set_sinks(conf, sink);
+    }
+
+    void Logger::initialize(const Config& conf, bool make_default) {
         if (conf.cout_log()) {
             if (conf.threadsafe()) {
-                if (conf.color())
-                    add_sink<spdlog::sinks::stdout_color_sink_mt>(conf);
-                else
-                    add_sink<spdlog::sinks::stdout_sink_mt>(conf);
+                if (conf.color()) {
+                    make_default ? set_sinks<spdlog::sinks::stdout_color_sink_mt>(conf)
+                                 : add_sink<spdlog::sinks::stdout_color_sink_mt>(conf);
+                }
+                else {
+                    make_default ? set_sinks<spdlog::sinks::stdout_sink_mt>(conf)
+                                 : add_sink<spdlog::sinks::stdout_sink_mt>(conf);
+                }
             }
             else {
-                if (conf.color())
-                    add_sink<spdlog::sinks::stdout_color_sink_st>(conf);
-                else
-                    add_sink<spdlog::sinks::stdout_sink_st>(conf);
+                if (conf.color()) {
+                    make_default ? set_sinks<spdlog::sinks::stdout_color_sink_st>(conf)
+                                 : add_sink<spdlog::sinks::stdout_color_sink_st>(conf);
+                }
+                else {
+                    make_default ? set_sinks<spdlog::sinks::stdout_sink_st>(conf)
+                                 : add_sink<spdlog::sinks::stdout_sink_st>(conf);
+                }
             }
         }
         else if (conf.cerr_log()) {
             if (conf.threadsafe()) {
-                if (conf.color())
-                    add_sink<spdlog::sinks::stderr_color_sink_mt>(conf);
-                else
-                    add_sink<spdlog::sinks::stderr_sink_mt>(conf);
+                if (conf.color()) {
+                    make_default ? set_sinks<spdlog::sinks::stderr_color_sink_mt>(conf)
+                                 : add_sink<spdlog::sinks::stderr_color_sink_mt>(conf);
+                }
+                else {
+                    make_default ? set_sinks<spdlog::sinks::stderr_sink_mt>(conf)
+                                 : add_sink<spdlog::sinks::stderr_sink_mt>(conf);
+                }
             }
             else {
-                if (conf.color())
-                    add_sink<spdlog::sinks::stderr_color_sink_st>(conf);
-                else
-                    add_sink<spdlog::sinks::stderr_sink_st>(conf);
+                if (conf.color()) {
+                    make_default ? set_sinks<spdlog::sinks::stderr_color_sink_st>(conf)
+                                 : add_sink<spdlog::sinks::stderr_color_sink_st>(conf);
+                }
+                else {
+                    make_default ? set_sinks<spdlog::sinks::stderr_sink_st>(conf)
+                                 : add_sink<spdlog::sinks::stderr_sink_st>(conf);
+                }
             }
         }
         else if (conf.file_log()) {
-            if (conf.threadsafe())
-                add_sink<spdlog::sinks::basic_file_sink_mt>(conf, conf.file());
-            else
-                add_sink<spdlog::sinks::basic_file_sink_st>(conf, conf.file());
+            if (conf.threadsafe()) {
+                make_default ? set_sinks<spdlog::sinks::basic_file_sink_mt>(conf, conf.file())
+                             : add_sink<spdlog::sinks::basic_file_sink_mt>(conf, conf.file());
+            }
+            else {
+                make_default ? set_sinks<spdlog::sinks::basic_file_sink_st>(conf, conf.file())
+                             : add_sink<spdlog::sinks::basic_file_sink_st>(conf, conf.file());
+            }
         }
         else
             throw std::runtime_error{"Invalid config created: {}"_format(conf)};
@@ -159,7 +187,7 @@ namespace un::log {
 
     void Logger::make_logger(const Config& conf, bool make_default) {
         std::lock_guard lock{detail::loggers_mutex()};
-        auto& maybe_logger = detail::loggers()[{conf.name.data(), conf.name.size()}];
+        auto& maybe_logger = detail::loggers()[conf.name];
 
         if (maybe_logger != nullptr)
             throw std::invalid_argument{"A logger with the name {} already exists"_format(conf.name)};
@@ -172,13 +200,13 @@ namespace un::log {
             maybe_logger = std::make_shared<spdlog::logger>(logger_name, get_master_sink());
         }
 
-        initialize(conf);
+        initialize(conf, make_default);
 
         // initialize logger w/ pattern
         if (make_default) {
             logger = maybe_logger;
             config = conf;
-            logger_name.assign(config.name.data(), config.name.size());
+            logger_name = config.name;
         }
     }
 

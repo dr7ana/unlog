@@ -165,6 +165,11 @@ namespace un::log {
     template <typename... Arg>
     log(fmt::format_string<Arg...>, LogLevel, Arg&&...) -> log<Arg...>;
 
+    // Exposed API functions
+    inline void make_logger(const Config& conf, bool make_default = false) {
+        return detail::make_logger(conf, make_default);
+    }
+
     inline void set_default_level(LogLevel level = LogLevel::info) {
         return detail::set_default_level(level);
     }

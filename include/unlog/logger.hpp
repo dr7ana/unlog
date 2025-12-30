@@ -22,12 +22,19 @@ namespace un::log {
 
         void add_sink(const Config& conf, sink_ptr sink);
 
+        void set_sinks(const Config& conf, sink_ptr sink);
+
         template <spdlog_sink_t T, typename... Arg>
         void add_sink(const Config& conf, Arg... args) {
             return add_sink(conf, std::make_shared<T>(std::forward<Arg>(args)...));
         }
 
-        void initialize(const Config& conf);
+        template <spdlog_sink_t T, typename... Arg>
+        void set_sinks(const Config& conf, Arg... args) {
+            return set_sinks(conf, std::make_shared<T>(std::forward<Arg>(args)...));
+        }
+
+        void initialize(const Config& conf, bool make_default);
 
       public:
         explicit Logger(std::string_view name = "unlog"sv);
@@ -36,7 +43,7 @@ namespace un::log {
 
         void make_logger(const Config& conf, bool make_default = false);
 
-        operator const logger_ptr&() {
+        operator logger_ptr&() {
             if (have_logger)
                 return logger;
             get_logger();
@@ -60,8 +67,12 @@ namespace un::log {
 
         void set_default_level(LogLevel level);
 
+        void make_logger(const Config& conf, bool make_default);
+
         void add_sink(sink_ptr sink);
 
         void add_sink(const Config& conf, sink_ptr sink);
+
+        void set_sinks(const Config& conf, sink_ptr sink);
     }  // namespace detail
 }  // namespace un::log

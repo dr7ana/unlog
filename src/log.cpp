@@ -70,6 +70,11 @@ namespace un::log {
 
         void add_sink(const Config& conf, sink_ptr sink) {
             set_sink_format(sink, conf.format);
+            master_sink->add_sink(std::move(sink));
+        }
+
+        void set_sinks(const Config& conf, sink_ptr sink) {
+            set_sink_format(sink, conf.format);
             master_sink->set_sinks({std::move(sink)});
         }
     }  // namespace detail
