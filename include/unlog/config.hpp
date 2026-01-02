@@ -28,6 +28,8 @@ namespace un::log {
                 return "cerr"sv;
             case Type::File:
                 return "file"sv;
+            default:
+                [[unlikely]] return "ERR"sv;
         }
     }
 
