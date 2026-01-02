@@ -61,10 +61,28 @@ namespace fmt {
         }
     };
 
-    template <un::log::const_span_type T>
-    struct formatter<T, char> : formatter<std::string_view> {
+    template <>
+    struct formatter<un::log::cspan, char> : formatter<std::string_view> {
         template <typename FormatContext>
-        auto format(const T& val, FormatContext& ctx) const {
+        auto format(const un::log::cspan& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(
+                    std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
+        }
+    };
+
+    template <>
+    struct formatter<un::log::uspan, unsigned char> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const un::log::uspan& val, FormatContext& ctx) const {
+            return formatter<std::string_view>::format(
+                    std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
+        }
+    };
+
+    template <>
+    struct formatter<un::log::bspan, std::byte> : formatter<std::string_view> {
+        template <typename FormatContext>
+        auto format(const un::log::bspan& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(
                     std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
         }
