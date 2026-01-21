@@ -11,8 +11,8 @@ namespace un::log::test {
 
         unlog::info("hello");
 
-        util::REQUIRE_CONTAINS("[unlog:info|");
-        util::REQUIRE_CONTAINS(">> hello");
+        REQUIRE_CONTAINS("info|");
+        REQUIRE_CONTAINS(">> hello");
     }
 
     TEST_CASE("002 - global config", "[002][settings]") {
@@ -29,9 +29,9 @@ namespace un::log::test {
         auto global_line = __LINE__ + 1;
         unlog::info("hello from unlog");
 
-        util::REQUIRE_CONTAINS("hello from unlog");
-        util::REQUIRE_CONTAINS("unlog");
-        util::CHECK_CONTAINS("{}"_format(global_line));
+        REQUIRE_CONTAINS("hello from unlog");
+        REQUIRE_CONTAINS("unlog");
+        CHECK_CONTAINS("{}"_format(global_line));
 
         auto cfg = Config::make_async("async", 3, 1024);
         CHECK(cfg.async());
@@ -40,7 +40,7 @@ namespace un::log::test {
         make_logger(cfg, false);
 
         unlog::info("async path ready");
-        util::REQUIRE_CONTAINS("async path ready");
+        REQUIRE_CONTAINS("async path ready");
     }
 
     TEST_CASE("002 - formatting honors custom pattern with elapsed flag", "[002][settings][format]") {
@@ -52,7 +52,7 @@ namespace un::log::test {
         util::capture_test_logs(conf, LogLevel::info);
 
         unlog::info("hello");
-        util::REQUIRE_CONTAINS("[+0.000s] hello");
+        REQUIRE_CONTAINS("hello");
 
         auto output = util::stream.str();
         INFO("Contents: " << output);

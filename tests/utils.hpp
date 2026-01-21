@@ -32,26 +32,48 @@ namespace un::log::test {
             set_default_level(level);
             detail::add_sink(conf, std::make_shared<spdlog::sinks::ostream_sink_mt>(stream));
         }
+    };
 
-        static auto CHECK_CONTAINS(const std::string& msg) {
-            INFO("Contents: " << stream.str());
-            CHECK(stream.str().contains(msg));
-        }
-
-        static auto REQUIRE_CONTAINS(const std::string& msg) {
-            INFO("Contents: " << stream.str());
-            REQUIRE(stream.str().contains(msg));
-        }
-
-        static auto CHECK_EMPTY() {
-            INFO("Contents: " << stream.str());
-            CHECK(stream.str().empty());
-        }
-
-        static auto REQUIRE_EMPTY() {
-            INFO("Contents: " << stream.str());
-            REQUIRE(stream.str().empty());
+    template <typename T, typename U = std::remove_cvref_t<T>>
+        requires std::convertible_to<U, std::string_view>
+    struct REQUIRE_CONTAINS {
+        REQUIRE_CONTAINS(U msg, const std::source_location& source_location = std::source_location::current()) {
+            INFO("Location: {}:{}"_format(source_location.file_name(), source_location.line()));
+            INFO("Contents: " << util::stream.str());
+            REQUIRE(util::stream.str().contains(msg));
         }
     };
+
+    template <typename T, typename U = std::remove_cvref_t<T>>
+        requires std::convertible_to<U, std::string_view>
+    struct CHECK_CONTAINS {
+        CHECK_CONTAINS(U msg, const std::source_location& source_location = std::source_location::current()) {
+            INFO("Location: {}:{}"_format(source_location.file_name(), source_location.line()));
+            INFO("Contents: " << util::stream.str());
+            CHECK(util::stream.str().contains(msg));
+        }
+    };
+
+    struct REQUIRE_EMPTY {
+        REQUIRE_EMPTY(const std::source_location& source_location = std::source_location::current()) {
+            INFO("Location: {}:{}"_format(source_location.file_name(), source_location.line()));
+            INFO("Contents: " << util::stream.str());
+            REQUIRE(util::stream.str().empty());
+        }
+    };
+
+    struct CHECK_EMPTY {
+        CHECK_EMPTY(const std::source_location& source_location = std::source_location::current()) {
+            INFO("Location: {}:{}"_format(source_location.file_name(), source_location.line()));
+            INFO("Contents: " << util::stream.str());
+            CHECK(util::stream.str().empty());
+        }
+    };
+
+    // deduction guides
+    template <typename T>
+    REQUIRE_CONTAINS(T msg) -> REQUIRE_CONTAINS<T>;
+    template <typename T>
+    CHECK_CONTAINS(T msg) -> CHECK_CONTAINS<T>;
 
 }  // namespace un::log::test

@@ -106,7 +106,7 @@ namespace un::log {
 
         if (!maybe_logger) {
             maybe_logger = std::make_shared<spdlog::logger>(logger_name, get_master_sink());
-            set_sinks<spdlog::sinks::stdout_color_sink_mt>(config);
+            add_sink<spdlog::sinks::stdout_color_sink_mt>(config);
         }
 
         logger = maybe_logger;
@@ -118,63 +118,49 @@ namespace un::log {
         return detail::add_sink(conf, sink);
     }
 
-    void Logger::set_sinks(const Config& conf, sink_ptr sink) {
-        return detail::set_sinks(conf, sink);
-    }
-
     void Logger::initialize(const Config& conf, bool make_default) {
         if (conf.cout_log()) {
             if (conf.threadsafe()) {
                 if (conf.color()) {
-                    make_default ? set_sinks<spdlog::sinks::stdout_color_sink_mt>(conf)
-                                 : add_sink<spdlog::sinks::stdout_color_sink_mt>(conf);
+                    add_sink<spdlog::sinks::stdout_color_sink_mt>(conf);
                 }
                 else {
-                    make_default ? set_sinks<spdlog::sinks::stdout_sink_mt>(conf)
-                                 : add_sink<spdlog::sinks::stdout_sink_mt>(conf);
+                    add_sink<spdlog::sinks::stdout_sink_mt>(conf);
                 }
             }
             else {
                 if (conf.color()) {
-                    make_default ? set_sinks<spdlog::sinks::stdout_color_sink_st>(conf)
-                                 : add_sink<spdlog::sinks::stdout_color_sink_st>(conf);
+                    add_sink<spdlog::sinks::stdout_color_sink_st>(conf);
                 }
                 else {
-                    make_default ? set_sinks<spdlog::sinks::stdout_sink_st>(conf)
-                                 : add_sink<spdlog::sinks::stdout_sink_st>(conf);
+                    add_sink<spdlog::sinks::stdout_sink_st>(conf);
                 }
             }
         }
         else if (conf.cerr_log()) {
             if (conf.threadsafe()) {
                 if (conf.color()) {
-                    make_default ? set_sinks<spdlog::sinks::stderr_color_sink_mt>(conf)
-                                 : add_sink<spdlog::sinks::stderr_color_sink_mt>(conf);
+                    add_sink<spdlog::sinks::stderr_color_sink_mt>(conf);
                 }
                 else {
-                    make_default ? set_sinks<spdlog::sinks::stderr_sink_mt>(conf)
-                                 : add_sink<spdlog::sinks::stderr_sink_mt>(conf);
+                    add_sink<spdlog::sinks::stderr_sink_mt>(conf);
                 }
             }
             else {
                 if (conf.color()) {
-                    make_default ? set_sinks<spdlog::sinks::stderr_color_sink_st>(conf)
-                                 : add_sink<spdlog::sinks::stderr_color_sink_st>(conf);
+                    add_sink<spdlog::sinks::stderr_color_sink_st>(conf);
                 }
                 else {
-                    make_default ? set_sinks<spdlog::sinks::stderr_sink_st>(conf)
-                                 : add_sink<spdlog::sinks::stderr_sink_st>(conf);
+                    add_sink<spdlog::sinks::stderr_sink_st>(conf);
                 }
             }
         }
         else if (conf.file_log()) {
             if (conf.threadsafe()) {
-                make_default ? set_sinks<spdlog::sinks::basic_file_sink_mt>(conf, conf.file())
-                             : add_sink<spdlog::sinks::basic_file_sink_mt>(conf, conf.file());
+                add_sink<spdlog::sinks::basic_file_sink_mt>(conf, conf.file());
             }
             else {
-                make_default ? set_sinks<spdlog::sinks::basic_file_sink_st>(conf, conf.file())
-                             : add_sink<spdlog::sinks::basic_file_sink_st>(conf, conf.file());
+                add_sink<spdlog::sinks::basic_file_sink_st>(conf, conf.file());
             }
         }
         else
@@ -194,10 +180,10 @@ namespace un::log {
 
         if (conf.async()) {
             maybe_logger = std::make_shared<spdlog::async_logger>(
-                    logger_name, get_master_sink(), detail::thread_pool(conf.threads, conf.pool_threads));
+                    conf.name, get_master_sink(), detail::thread_pool(conf.threads, conf.pool_threads));
         }
         else {
-            maybe_logger = std::make_shared<spdlog::logger>(logger_name, get_master_sink());
+            maybe_logger = std::make_shared<spdlog::logger>(conf.name, get_master_sink());
         }
 
         initialize(conf, make_default);

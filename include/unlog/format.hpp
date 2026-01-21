@@ -25,7 +25,7 @@ namespace un::log {
             std::array<char, N> str;
 
             consteval string_literal(const char (&s)[N]) { std::ranges::copy(s, s + N, str.begin()); }
-            consteval std::string_view sv() const { return {str.data(), N - 1}; }
+            constexpr std::string_view sv() const { return {str.data(), N - 1}; }
         };
 
         template <string_literal Format>
@@ -58,33 +58,6 @@ namespace fmt {
         template <typename FormatContext>
         auto format(const T& val, FormatContext& ctx) const {
             return formatter<std::string_view>::format(val.to_string(), ctx);
-        }
-    };
-
-    template <>
-    struct formatter<un::log::cspan, char> : formatter<std::string_view> {
-        template <typename FormatContext>
-        auto format(const un::log::cspan& val, FormatContext& ctx) const {
-            return formatter<std::string_view>::format(
-                    std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
-        }
-    };
-
-    template <>
-    struct formatter<un::log::uspan, unsigned char> : formatter<std::string_view> {
-        template <typename FormatContext>
-        auto format(const un::log::uspan& val, FormatContext& ctx) const {
-            return formatter<std::string_view>::format(
-                    std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
-        }
-    };
-
-    template <>
-    struct formatter<un::log::bspan, std::byte> : formatter<std::string_view> {
-        template <typename FormatContext>
-        auto format(const un::log::bspan& val, FormatContext& ctx) const {
-            return formatter<std::string_view>::format(
-                    std::string_view{reinterpret_cast<const char*>(val.data()), val.size()}, ctx);
         }
     };
 }  // namespace fmt

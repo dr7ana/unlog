@@ -9,9 +9,6 @@ namespace un::log {
     template <typename T>
     concept basic_char = sizeof(T) == 1 && !std::same_as<T, bool> && (std::integral<T> || std::same_as<T, std::byte>);
 
-    template <basic_char T = char, size_t N = std::dynamic_extent>
-    using const_span = std::span<const T, N>;
-
     using cspan = std::span<const char>;
     using uspan = std::span<const unsigned char>;
     using bspan = std::span<const std::byte>;
@@ -50,42 +47,48 @@ namespace un::log {
             }
 
             static constexpr size_t SIZE{N - 1};
-            T arr[N];
+            std::array<T, N> arr;
 
-            constexpr auto span() const { return std::span<const T, SIZE>{arr, SIZE}; }
-        };
+            constexpr auto view() const { return std::string_view{reinterpret_cast<const char*>(arr.data()), SIZE}; }
+            constexpr auto span() const { return std::span<const T, SIZE>{arr.begin(), SIZE}; }
 
-        template <size_t N>
-        struct sp_literal : span_literal<char, N> {
-            consteval sp_literal(const char (&s)[N]) : span_literal<char, N>{s} {}
-        };
+            operator std::span<const T, SIZE>() { return span(); }
 
-        template <size_t N>
-        struct usp_literal : span_literal<unsigned char, N> {
-            consteval usp_literal(const char (&s)[N]) : span_literal<unsigned char, N>{s} {}
-        };
-
-        template <size_t N>
-        struct bsp_literal : span_literal<std::byte, N> {
-            consteval bsp_literal(const char (&s)[N]) : span_literal<char, N>{s} {}
+            std::string to_string() const { return std::string{reinterpret_cast<const char*>(arr.data()), SIZE}; }
+            static constexpr auto to_string_formattable = true;
         };
 
     }  // namespace detail
 
+    template <size_t N>
+    struct sp_literal : detail::span_literal<char, N> {
+        consteval sp_literal(const char (&s)[N]) : detail::span_literal<char, N>{s} {}
+    };
+
+    template <size_t N>
+    struct usp_literal : detail::span_literal<unsigned char, N> {
+        consteval usp_literal(const char (&s)[N]) : detail::span_literal<unsigned char, N>{s} {}
+    };
+
+    template <size_t N>
+    struct bsp_literal : detail::span_literal<std::byte, N> {
+        consteval bsp_literal(const char (&s)[N]) : detail::span_literal<std::byte, N>{s} {}
+    };
+
     namespace literals {
-        template <detail::sp_literal CStr>
+        template <sp_literal Csp>
         inline consteval auto operator""_sp() {
-            return CStr.span();
+            return Csp.span();
         }
 
-        template <detail::usp_literal CStr>
+        template <usp_literal Usp>
         inline consteval auto operator""_usp() {
-            return CStr.span();
+            return Usp.span();
         }
 
-        template <detail::bsp_literal CStr>
+        template <bsp_literal Bsp>
         inline consteval auto operator""_bsp() {
-            return CStr.span();
+            return Bsp.span();
         }
 
     }  // namespace literals
