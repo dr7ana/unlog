@@ -17,7 +17,7 @@ if(CCACHE_PROGRAM)
 endif()
 
 project(unlog
-    VERSION 0.0.1
+    VERSION 0.1.0
     DESCRIPTION "unnecessarily fast C++23 logging"
     LANGUAGES ${LANGS})
 
@@ -28,8 +28,8 @@ else()
 endif()
 
 # TODO: not configured yet for shared vs static
-option(BUILD_SHARED_LIBS "Build as shared library" OFF)
-option(BUILD_STATIC_DEPS "Build and link against static dependencies" OFF)
+#option(BUILD_SHARED_LIBS "Build as shared library" OFF)
+#option(BUILD_STATIC_DEPS "Build and link against static dependencies" OFF)
 option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
 option(UNLOG_BUILD_TESTS "Build unlog test suite" ${UNLOG_IS_TOPLEVEL_PROJECT})
 
