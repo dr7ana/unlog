@@ -21,6 +21,10 @@ project(unlog
     DESCRIPTION "unnecessarily fast C++23 logging"
     LANGUAGES ${LANGS})
 
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "unlog supports Linux only")
+endif()
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(UNLOG_IS_TOPLEVEL_PROJECT TRUE)
 else()
@@ -38,7 +42,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(default_lto ON)
-if(WIN32 OR APPLE OR BUILD_STATIC_DEPS)
+if(BUILD_STATIC_DEPS)
     set(default_lto OFF)
 endif()
 option(WITH_LTO "Compile with Link-time Optimization" ${default_lto})
@@ -61,7 +65,10 @@ if(IPO_ENABLED AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 endif()
 
 add_library(unlog
-    src/log.cpp
+    src/backend/backend.cpp
+    src/backend/producer.cpp
+    src/backend/ring.cpp
+    src/backend/sqpoll.cpp
     src/logger.cpp
     src/utils.cpp
 )
@@ -74,7 +81,6 @@ add_subdirectory(external)
 target_link_libraries(unlog 
     PUBLIC 
     fmt::fmt
-    spdlog::spdlog_header_only
 )
 
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)

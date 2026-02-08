@@ -14,9 +14,11 @@ AlignTrailingComments: 'true'
 AllowAllArgumentsOnNextLine: 'true'
 AllowShortBlocksOnASingleLine: 'false'
 AllowShortCaseLabelsOnASingleLine: 'false'
+AllowShortCompoundRequirementOnASingleLine: 'true'
 AllowShortFunctionsOnASingleLine: 'Inline'
 AllowShortIfStatementsOnASingleLine: 'false'
 AllowShortLoopsOnASingleLine: 'false'
+IndentRequiresClause: 'true'
 RequiresClausePosition: 'OwnLine'
 
 # breaking

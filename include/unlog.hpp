@@ -13,13 +13,13 @@ namespace un::log {
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::trace, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::trace, fmt, std::forward<Arg>(args)...);
         }
 
         trace(fmt::format_string<Arg...> fmt,
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::trace, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::trace, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -30,13 +30,13 @@ namespace un::log {
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::debug, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::debug, fmt, std::forward<Arg>(args)...);
         }
 
         debug(fmt::format_string<Arg...> fmt,
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::debug, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::debug, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -47,13 +47,13 @@ namespace un::log {
              Arg&&... args,
              const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::info, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::info, fmt, std::forward<Arg>(args)...);
         }
 
         info(fmt::format_string<Arg...> fmt,
              Arg&&... args,
              const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::info, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::info, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -64,13 +64,13 @@ namespace un::log {
              Arg&&... args,
              const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::warn, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::warn, fmt, std::forward<Arg>(args)...);
         }
 
         warn(fmt::format_string<Arg...> fmt,
              Arg&&... args,
              const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::warn, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::warn, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -82,14 +82,14 @@ namespace un::log {
                 Arg&&... args,
                 const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::critical, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::critical, fmt, std::forward<Arg>(args)...);
         }
 
         critical(
                 fmt::format_string<Arg...> fmt,
                 Arg&&... args,
                 const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::critical, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::critical, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -100,20 +100,20 @@ namespace un::log {
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
             if (logger)
-                logger->log(detail::sloc(source_location), LogLevel::err, fmt, std::forward<Arg>(args)...);
+                logger->log(detail::sloc(source_location), log_level::err, fmt, std::forward<Arg>(args)...);
         }
 
         error(fmt::format_string<Arg...> fmt,
               Arg&&... args,
               const std::source_location& source_location = std::source_location::current()) {
-            global_logger()->log(detail::sloc(source_location), LogLevel::err, fmt, std::forward<Arg>(args)...);
+            global_logger()->log(detail::sloc(source_location), log_level::err, fmt, std::forward<Arg>(args)...);
         }
     };
 
     template <typename... Arg>
     struct log {
         log(const logger_ptr& logger,
-            LogLevel level,
+            log_level level,
             fmt::format_string<Arg...> fmt,
             Arg&&... args,
             const std::source_location& source_location = std::source_location::current()) {
@@ -122,7 +122,7 @@ namespace un::log {
         }
 
         log(fmt::format_string<Arg...> fmt,
-            LogLevel level,
+            log_level level,
             Arg&&... args,
             const std::source_location& source_location = std::source_location::current()) {
             global_logger()->log(detail::sloc(source_location), level, fmt, std::forward<Arg>(args)...);
@@ -161,26 +161,22 @@ namespace un::log {
     critical(fmt::format_string<Arg...>, Arg&&...) -> critical<Arg...>;
 
     template <typename... Arg>
-    log(const logger_ptr&, LogLevel, fmt::format_string<Arg...>, Arg&&...) -> log<Arg...>;
+    log(const logger_ptr&, log_level, fmt::format_string<Arg...>, Arg&&...) -> log<Arg...>;
     template <typename... Arg>
-    log(fmt::format_string<Arg...>, LogLevel, Arg&&...) -> log<Arg...>;
+    log(fmt::format_string<Arg...>, log_level, Arg&&...) -> log<Arg...>;
 
     // Exposed API functions
-    inline void make_logger(const Config& conf, bool make_default = false) {
+    template <detail::basic_config_type Conf>
+    inline void make_logger(const Conf& conf, bool make_default = false) {
         return detail::make_logger(conf, make_default);
     }
 
-    inline void set_default_level(LogLevel level = LogLevel::info) {
+    inline void set_default_level(log_level level = log_level::info) {
         return detail::set_default_level(level);
     }
 
-    inline LogLevel get_default_level() {
+    inline log_level get_default_level() {
         return detail::get_default_level();
-    }
-
-    template <spdlog_sink_t T, typename... Arg>
-    inline void add_sink(Arg... args) {
-        return detail::add_sink(std::make_shared<T>(std::forward<Arg>(args)...));
     }
 
     void flush();

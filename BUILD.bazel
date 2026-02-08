@@ -10,9 +10,9 @@ cc_library(
     ]),
     includes = ["include"],
     linkstatic = True,
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
     deps = [
         "@fmt",
-        "@spdlog",
     ],
 )
