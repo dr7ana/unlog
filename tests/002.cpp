@@ -45,7 +45,7 @@ namespace un::log::test {
 
     TEST_CASE("002 - formatting honors custom pattern with elapsed flag", "[002][settings][format]") {
         auto format = std::string{"[%*] %v"};
-        auto conf = Config{"custom", Type::cout, Flags::color, 0, 0, format};
+        auto conf = Config{"custom", SinkType::cout, Flags::color, 0, 0, format};
 
         make_logger(conf, true);
 
