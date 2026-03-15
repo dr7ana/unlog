@@ -4,15 +4,16 @@ cc_library(
     name = "libunlog",
     srcs = glob([
         "src/**/*.cpp",
+        "src/**/*.hpp",
     ]),
     hdrs = glob([
         "include/**/*.hpp",
     ]),
     includes = ["include"],
     linkstatic = True,
-    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
     deps = [
         "@fmt",
+        "@utl",
     ],
 )

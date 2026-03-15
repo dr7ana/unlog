@@ -10,3 +10,6 @@ endif()
 # fmt
 add_subdirectory(fmt)
 
+# utl
+add_subdirectory(utl)
+

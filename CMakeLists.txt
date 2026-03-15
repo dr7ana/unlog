@@ -80,6 +80,7 @@ add_subdirectory(external)
 
 target_link_libraries(unlog 
     PUBLIC 
+    utl::libutl
     fmt::fmt
 )
 

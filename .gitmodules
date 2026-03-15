@@ -4,3 +4,6 @@
 [submodule "tests/Catch2"]
 	path = tests/Catch2
 	url = https://github.com/catchorg/Catch2.git
+[submodule "external/utl"]
+	path = external/utl
+	url = https://github.com/dr7ana/utl.git
