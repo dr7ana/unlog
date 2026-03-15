@@ -9,7 +9,7 @@ bazel_dep(name = "catch2", version = "3.11.0")
 bazel_dep(name = "utl", version = "0.1.0")
 git_override(
     module_name = "utl",
-    commit = "b02487c2c2773dc5f833684c47920b8e6a781a45",
+    commit = "c802a77b5e355b7cd3dfed33a6effbabab610d78",
     init_submodules = True,
     remote = "https://github.com/dr7ana/utl",
 )
@@ -18,6 +18,5 @@ bazel_dep(name = "allocazam", version = "0.1.0")
 git_override(
     module_name = "allocazam",
     commit = "61139e2b46c744330ad862b2c019ac804ea6a331",
-    init_submodules = True,
     remote = "https://github.com/dr7ana/allocazam",
 )
