@@ -21,6 +21,10 @@ project(unlog
     DESCRIPTION "unnecessarily fast C++23 logging"
     LANGUAGES ${LANGS})
 
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "unlog supports Linux only")
+endif()
+
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     set(UNLOG_IS_TOPLEVEL_PROJECT TRUE)
 else()
@@ -33,12 +37,18 @@ endif()
 option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
 option(UNLOG_BUILD_TESTS "Build unlog test suite" ${UNLOG_IS_TOPLEVEL_PROJECT})
 
+set(unlog_diagnostic_default OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(unlog_diagnostic_default ON)
+endif()
+option(UNLOG_DIAGNOSTIC "Enable unlog diagnostic counters" ${unlog_diagnostic_default})
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(default_lto ON)
-if(WIN32 OR APPLE OR BUILD_STATIC_DEPS)
+if(BUILD_STATIC_DEPS)
     set(default_lto OFF)
 endif()
 option(WITH_LTO "Compile with Link-time Optimization" ${default_lto})
@@ -61,20 +71,20 @@ if(IPO_ENABLED AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 endif()
 
 add_library(unlog
-    src/log.cpp
-    src/logger.cpp
+    src/channel.cpp
     src/utils.cpp
 )
 
 target_include_directories(unlog PUBLIC include)
 target_compile_features(unlog PUBLIC cxx_std_23)
+target_compile_definitions(unlog PUBLIC UNLOG_DIAGNOSTIC=$<BOOL:${UNLOG_DIAGNOSTIC}>)
 
 add_subdirectory(external)
 
 target_link_libraries(unlog 
     PUBLIC 
+    utl::libutl
     fmt::fmt
-    spdlog::spdlog_header_only
 )
 
 set(warning_flags -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-function -Werror=vla -Wno-deprecated-declaration)

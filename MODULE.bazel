@@ -5,5 +5,18 @@ module(
 
 bazel_dep(name = "rules_cc", version = "0.2.13")
 bazel_dep(name = "fmt", version = "12.1.0")
-bazel_dep(name = "spdlog", version = "1.16.0.bcr.2")
 bazel_dep(name = "catch2", version = "3.11.0")
+bazel_dep(name = "utl", version = "0.1.0")
+git_override(
+    module_name = "utl",
+    commit = "3b9b54fea850ab3c739da5936573fcb96353e301",
+    init_submodules = True,
+    remote = "https://github.com/dr7ana/utl",
+)
+
+bazel_dep(name = "allocazam", version = "0.1.0")
+git_override(
+    module_name = "allocazam",
+    commit = "61139e2b46c744330ad862b2c019ac804ea6a331",
+    remote = "https://github.com/dr7ana/allocazam",
+)

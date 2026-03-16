@@ -14,9 +14,11 @@ AlignTrailingComments: 'true'
 AllowAllArgumentsOnNextLine: 'true'
 AllowShortBlocksOnASingleLine: 'false'
 AllowShortCaseLabelsOnASingleLine: 'false'
+AllowShortCompoundRequirementOnASingleLine: 'true'
 AllowShortFunctionsOnASingleLine: 'Inline'
 AllowShortIfStatementsOnASingleLine: 'false'
 AllowShortLoopsOnASingleLine: 'false'
+IndentRequiresClause: 'true'
 RequiresClausePosition: 'OwnLine'
 
 # breaking
@@ -70,14 +72,16 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<unlog'
     Priority: 3
-  - Regex: '^"(fmt|spdlog|catch2)'
+  - Regex: '^"(utl)'
     Priority: 4
-  - Regex: '^<(fmt|spdlog|catch2)'
+  - Regex: '^"(fmt|spdlog|catch2)'
     Priority: 5
-  - Regex: '^<.*\.h(pp)?>$'
+  - Regex: '^<(fmt|spdlog|catch2)'
     Priority: 6
-  - Regex: '(<)(.)+(>)'
+  - Regex: '^<.*\.h(pp)?>$'
     Priority: 7
+  - Regex: '(<)(.)+(>)'
+    Priority: 8
 
 # spacing
 SpaceBeforeParens: ControlStatements

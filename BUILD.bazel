@@ -4,6 +4,7 @@ cc_library(
     name = "libunlog",
     srcs = glob([
         "src/**/*.cpp",
+        "src/**/*.hpp",
     ]),
     hdrs = glob([
         "include/**/*.hpp",
@@ -13,6 +14,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@fmt",
-        "@spdlog",
+        "@utl",
     ],
 )

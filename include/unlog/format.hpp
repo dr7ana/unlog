@@ -40,6 +40,16 @@ namespace un::log {
                 return fmt::format(Format.sv(), std::forward<T>(args)...);
             }
         };
+
+        template <string_literal Format>
+        struct fmt_append_wrapper : fmt_wrapper<Format> {
+            consteval fmt_append_wrapper() = default;
+
+            template <typename String, typename... T>
+            constexpr auto operator()(String& s, T&&... args) && {
+                return fmt::format_to(std::back_inserter(s), Format.sv(), std::forward<T>(args)...);
+            }
+        };
     }  //  namespace detail
 
     namespace literals {
@@ -48,6 +58,10 @@ namespace un::log {
             return detail::fmt_wrapper<Format>{};
         }
 
+        template <detail::string_literal Format>
+        inline consteval auto operator""_format_to() {
+            return detail::fmt_append_wrapper<Format>{};
+        }
     }  // namespace literals
 
 }  // namespace un::log
