@@ -155,6 +155,7 @@ namespace un::log::test {
         CHECK_NOTHROW(detail::add_sink(first_cfg, std::make_shared<backend::ostream_sink>(stream)));
     }
 
+#if UNLOG_DIAGNOSTIC
     TEST_CASE("007 - dropped first log does not activate runtime", "[007][runtime][activation]") {
         runtime_state_guard guard;
 
@@ -186,6 +187,7 @@ namespace un::log::test {
         CHECK_THROWS_AS(
                 detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(late_stream)), std::invalid_argument);
     }
+#endif
 
     TEST_CASE("007 - runtime blocks late setup after first emitted log", "[007][runtime][activation]") {
         runtime_state_guard guard;

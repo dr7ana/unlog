@@ -917,6 +917,7 @@ namespace un::log {
                     lock, [st, target] { return st->flush_completed.load(std::memory_order_acquire) >= target; });
         }
 
+#if UNLOG_DIAGNOSTIC
         backend::producer_stats backend_stats() {
             auto out = backend::producer_stats{};
             auto producers = runtime_queue_producer_snapshot();
@@ -932,6 +933,7 @@ namespace un::log {
             }
             return out;
         }
+#endif
 
         channel_runtime_view channel_runtime_view_for(channel_id id) noexcept {
             if (runtime_is_shutting_down()) {

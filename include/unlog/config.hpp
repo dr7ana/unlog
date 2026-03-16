@@ -14,6 +14,10 @@
 #include <type_traits>
 #include <utility>
 
+#ifndef UNLOG_DIAGNOSTIC
+#define UNLOG_DIAGNOSTIC 0
+#endif
+
 namespace un::log {
 
     using namespace literals;

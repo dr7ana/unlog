@@ -67,10 +67,6 @@ namespace un::log::backend {
         [[nodiscard]] size_t active_word_index() const noexcept { return active_word_index_; }
         [[nodiscard]] uint64_t active_bit_mask() const noexcept { return active_bit_mask_; }
 
-        void count_emitted() noexcept { emitted_.fetch_add(1, std::memory_order_relaxed); }
-        void count_dropped() noexcept { dropped_.fetch_add(1, std::memory_order_relaxed); }
-        void count_truncated() noexcept { truncated_.fetch_add(1, std::memory_order_relaxed); }
-
         void bind_active_word(producer_active_word* active_word, size_t active_index) noexcept {
             active_word_ = active_word;
             active_index_ = active_index;
@@ -90,6 +86,11 @@ namespace un::log::backend {
             return active_published_.load(std::memory_order_acquire);
         }
 
+#if UNLOG_DIAGNOSTIC
+        void count_emitted() noexcept { emitted_.fetch_add(1, std::memory_order_relaxed); }
+        void count_dropped() noexcept { dropped_.fetch_add(1, std::memory_order_relaxed); }
+        void count_truncated() noexcept { truncated_.fetch_add(1, std::memory_order_relaxed); }
+
         [[nodiscard]] producer_stats stats() const noexcept {
             return producer_stats{
                     .emitted = emitted_.load(std::memory_order_relaxed),
@@ -97,6 +98,7 @@ namespace un::log::backend {
                     .truncated = truncated_.load(std::memory_order_relaxed),
             };
         }
+#endif
 
         void reconfigure(size_t thread_buffer_size) {
             auto queue_capacity = traits::queue_capacity_for(thread_buffer_size);
@@ -106,9 +108,11 @@ namespace un::log::backend {
 
             queue_.emplace(*queue_capacity);
             sequence_ = 0;
+#if UNLOG_DIAGNOSTIC
             emitted_.store(0, std::memory_order_relaxed);
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
+#endif
             active_published_.store(false, std::memory_order_relaxed);
         }
 
@@ -117,9 +121,12 @@ namespace un::log::backend {
                 queue_->clear();
             }
             sequence_ = 0;
+
+#if UNLOG_DIAGNOSTIC
             emitted_.store(0, std::memory_order_relaxed);
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
+#endif
             active_published_.store(false, std::memory_order_relaxed);
         }
 
@@ -132,9 +139,11 @@ namespace un::log::backend {
         uint64_t active_bit_mask_{0};
         std::optional<queue_type> queue_{};
         std::atomic<bool> active_published_{false};
+#if UNLOG_DIAGNOSTIC
         std::atomic<uint64_t> emitted_{0};
         std::atomic<uint64_t> dropped_{0};
         std::atomic<uint64_t> truncated_{0};
+#endif
     };
 
     using runtime_queue_traits = queue_runtime_traits<options::default_max_record_size>;

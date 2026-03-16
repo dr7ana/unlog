@@ -16,6 +16,7 @@ namespace un::log::test {
         REQUIRE_CONTAINS("runtime-message");
     }
 
+#if UNLOG_DIAGNOSTIC
     TEST_CASE("004 - backend stats move on emitted log", "[004][backend][stats]") {
         runtime_state_guard guard;
 
@@ -94,5 +95,6 @@ namespace un::log::test {
         REQUIRE_CONTAINS{"small-limit-"};
         CHECK_NOT_CONTAINS{msg};
     }
+#endif
 
 }  // namespace un::log::test

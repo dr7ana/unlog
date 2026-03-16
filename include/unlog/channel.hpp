@@ -148,14 +148,18 @@ namespace un::log {
             }
 
             if (!published) {
+#if UNLOG_DIAGNOSTIC
                 producer.count_dropped();
+#endif
                 return;
             }
 
+#if UNLOG_DIAGNOSTIC
             producer.count_emitted();
             if (outcome.truncated) {
                 producer.count_truncated();
             }
+#endif
 
             note_runtime_work_available(producer, runtime_mode);
             mark_runtime_active_after_commit();
@@ -303,7 +307,9 @@ namespace un::log {
 
         void flush_backend();
 
+#if UNLOG_DIAGNOSTIC
         backend::producer_stats backend_stats();
+#endif
 
         log_level get_default_level();
 

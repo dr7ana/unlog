@@ -37,6 +37,12 @@ endif()
 option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
 option(UNLOG_BUILD_TESTS "Build unlog test suite" ${UNLOG_IS_TOPLEVEL_PROJECT})
 
+set(unlog_diagnostic_default OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(unlog_diagnostic_default ON)
+endif()
+option(UNLOG_DIAGNOSTIC "Enable unlog diagnostic counters" ${unlog_diagnostic_default})
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -71,6 +77,7 @@ add_library(unlog
 
 target_include_directories(unlog PUBLIC include)
 target_compile_features(unlog PUBLIC cxx_std_23)
+target_compile_definitions(unlog PUBLIC UNLOG_DIAGNOSTIC=$<BOOL:${UNLOG_DIAGNOSTIC}>)
 
 add_subdirectory(external)
 
