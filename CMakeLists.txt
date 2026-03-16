@@ -65,11 +65,7 @@ if(IPO_ENABLED AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 endif()
 
 add_library(unlog
-    src/backend/backend.cpp
-    src/backend/producer.cpp
-    src/backend/ring.cpp
-    src/backend/sqpoll.cpp
-    src/logger.cpp
+    src/channel.cpp
     src/utils.cpp
 )
 

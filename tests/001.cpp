@@ -5,7 +5,6 @@ namespace un::log::test {
         CHECK((std::same_as<typename config<>::clock_type, options::steady>));
         CHECK((std::same_as<typename config<>::overflow_type, options::drop>));
         CHECK(config<>::max_record_size == default_max_record_size);
-        CHECK(config<>::thread_bufsize == default_thread_bufsize);
     }
 
     TEST_CASE("001 - config tagged option overrides", "[001][config][options]") {
@@ -14,14 +13,27 @@ namespace un::log::test {
         CHECK((std::same_as<typename override_config::clock_type, options::system>));
         CHECK((std::same_as<typename override_config::overflow_type, options::truncate>));
         CHECK(override_config::max_record_size == 8192u);
-        CHECK(override_config::thread_bufsize == default_thread_bufsize);
 
-        auto cfg = override_config::make_sqpoll("override");
+        auto cfg = override_config::make("override");
         CHECK(decltype(cfg)::max_record_size == 8192u);
     }
 
+    TEST_CASE("001 - global config defaults", "[001][config][global]") {
+        auto cfg = get_global_config();
+
+        CHECK(cfg.mode == RuntimeMode::single_threaded);
+        CHECK(cfg.thread_bufsize == options::default_thread_bufsize);
+    }
+
+    TEST_CASE("001 - runtime queue capacity derives from global thread buffer size", "[001][config][global]") {
+        auto capacity = backend::runtime_queue_traits::queue_capacity_for(options::default_thread_bufsize);
+
+        REQUIRE(capacity.has_value());
+        CHECK(capacity.value() > 0u);
+    }
+
     TEST_CASE("001 - config defaults", "[001][config]") {
-        auto cfg = config<>::make_sqpoll("demo");
+        auto cfg = config<>::make("demo");
 
         CHECK(cfg.name == "demo");
         CHECK(cfg.color());
@@ -30,8 +42,7 @@ namespace un::log::test {
         CHECK(detail::config_overflow_policy_v<decltype(cfg)> == OverflowPolicy::drop);
         CHECK(detail::config_clock_type_v<decltype(cfg)> == ClockType::steady);
         CHECK(decltype(cfg)::max_record_size == default_max_record_size);
-        CHECK(cfg.strict_nonblocking);
-        CHECK(cfg.sqpoll_queue_depth == options::default_sqpoll_queue_depth);
+        CHECK_FALSE(cfg.filename.has_value());
         CHECK_FALSE(cfg.output_fd.has_value());
         CHECK_FALSE(cfg.unix_dgram_path.has_value());
     }
@@ -49,14 +60,13 @@ namespace un::log::test {
 
     TEST_CASE("001 - config file validation", "[001][config]") {
         REQUIRE_THROWS_AS((config<>::make_file(fs::path{}, "bad")), std::invalid_argument);
-        REQUIRE_THROWS_AS((test_helper::make_sqpoll_config("bad", SinkType::file, 0)), std::invalid_argument);
+        REQUIRE_THROWS_AS((test_helper::make_config("bad", SinkType::file, 0)), std::invalid_argument);
     }
 
     TEST_CASE("001 - config fd sink validation", "[001][config]") {
-        REQUIRE_THROWS_AS(
-                (test_helper::make_sqpoll_config("bad-fd", SinkType::fd, Flags::color)), std::invalid_argument);
+        REQUIRE_THROWS_AS((test_helper::make_config("bad-fd", SinkType::fd, Flags::color)), std::invalid_argument);
 
-        auto cfg = test_helper::make_sqpoll_config("fd-sink", SinkType::fd, 0, std::nullopt, 2);
+        auto cfg = test_helper::make_config("fd-sink", SinkType::fd, 0, std::nullopt, std::nullopt, 2);
         CHECK(cfg.sink_type == SinkType::fd);
         REQUIRE(cfg.output_fd.has_value());
         CHECK(cfg.output_fd.value() == 2);
@@ -65,11 +75,16 @@ namespace un::log::test {
 
     TEST_CASE("001 - config unix dgram sink validation", "[001][config]") {
         REQUIRE_THROWS_AS(
-                (test_helper::make_sqpoll_config("bad-dgram", SinkType::unix_dgram, Flags::color)),
-                std::invalid_argument);
+                (test_helper::make_config("bad-dgram", SinkType::unix_dgram, Flags::color)), std::invalid_argument);
 
-        auto cfg = test_helper::make_sqpoll_config(
-                "dgram-sink", SinkType::unix_dgram, 0, std::nullopt, std::nullopt, fs::path{"/tmp/unlog-test.sock"});
+        auto cfg = test_helper::make_config(
+                "dgram-sink",
+                SinkType::unix_dgram,
+                0,
+                std::nullopt,
+                std::nullopt,
+                std::nullopt,
+                fs::path{"/tmp/unlog-test.sock"});
         CHECK(cfg.sink_type == SinkType::unix_dgram);
         REQUIRE(cfg.unix_dgram_path.has_value());
         CHECK(cfg.unix_dgram_path.value() == fs::path{"/tmp/unlog-test.sock"});

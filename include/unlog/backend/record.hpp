@@ -1,11 +1,14 @@
 #pragma once
 
 #include "unlog/config.hpp"
+#include "unlog/format.hpp"
 
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -84,6 +87,202 @@ namespace un::log::backend {
         if (level > static_cast<uint8_t>(log_level::off))
             return log_level::off;
         return static_cast<log_level>(level);
+    }
+
+    struct record_slot_header {
+        channel_id channel{invalid_channel_id};
+        uint64_t timestamp{0};
+        uint64_t thread_id{0};
+        uint64_t sequence{0};
+
+        const char* source_file{nullptr};
+        const char* source_function{nullptr};
+        int32_t source_line{0};
+
+        uint32_t payload_size{0};
+        uint8_t level{encode_level(log_level::info)};
+        bool truncated{false};
+    };
+
+    static_assert(std::is_standard_layout_v<record_slot_header>);
+    static_assert(std::is_trivially_copyable_v<record_slot_header>);
+
+    inline constexpr auto record_slot_truncate_marker = "[truncated]"sv;
+
+    inline constexpr size_t record_slot_storage_size(size_t max_record_size) noexcept {
+        return align_record_size(max_record_size);
+    }
+
+    inline constexpr std::optional<size_t> payload_capacity_for_record_slot_limit(size_t max_record_size) noexcept {
+        auto storage_size = record_slot_storage_size(max_record_size);
+        auto header_size = align_record_size(sizeof(record_slot_header));
+        if (storage_size < header_size)
+            return std::nullopt;
+
+        return storage_size - header_size;
+    }
+
+    enum class record_slot_write_result : uint8_t {
+        written = 0,
+        dropped = 1,
+        truncated = 2,
+    };
+
+    namespace slot_detail {
+        inline void write_truncate_marker(char* out, size_t size) noexcept {
+            if (!out || size == 0)
+                return;
+
+            if (size <= record_slot_truncate_marker.size()) {
+                std::memcpy(out, record_slot_truncate_marker.data(), size);
+                return;
+            }
+
+            auto marker_offset = size - record_slot_truncate_marker.size();
+            std::memcpy(out + marker_offset, record_slot_truncate_marker.data(), record_slot_truncate_marker.size());
+        }
+    }  // namespace slot_detail
+
+    template <size_t MaxRecordSize>
+    struct alignas(record_alignment) basic_record_slot {
+        static constexpr size_t storage_size = record_slot_storage_size(MaxRecordSize);
+        static constexpr size_t payload_capacity =
+                payload_capacity_for_record_slot_limit(MaxRecordSize).value_or(size_t{0});
+        static constexpr size_t payload_storage_size = payload_capacity == 0 ? size_t{1} : payload_capacity;
+
+        record_slot_header header{};
+        std::array<char, payload_storage_size> payload{};
+
+        constexpr void reset(
+                channel_id channel,
+                log_level level_value,
+                uint64_t timestamp_value,
+                uint64_t thread_id_value,
+                uint64_t sequence_value,
+                const ::un::log::detail::source_loc& source_location) noexcept {
+            header.channel = channel;
+            header.timestamp = timestamp_value;
+            header.thread_id = thread_id_value;
+            header.sequence = sequence_value;
+            header.source_file = source_location.filename;
+            header.source_function = source_location.function;
+            header.source_line = static_cast<int32_t>(source_location.line);
+            header.payload_size = 0;
+            header.level = encode_level(level_value);
+            header.truncated = false;
+        }
+
+        [[nodiscard]] constexpr char* payload_data() noexcept { return payload.data(); }
+        [[nodiscard]] constexpr const char* payload_data() const noexcept { return payload.data(); }
+        [[nodiscard]] constexpr size_t capacity() const noexcept { return payload_capacity; }
+        [[nodiscard]] constexpr std::string_view message() const noexcept {
+            return {payload.data(), static_cast<size_t>(header.payload_size)};
+        }
+        [[nodiscard]] constexpr log_level level() const noexcept { return decode_level(header.level); }
+        [[nodiscard]] constexpr ::un::log::detail::source_loc source_location() const noexcept {
+            return ::un::log::detail::source_loc{
+                    .filename = header.source_file,
+                    .line = header.source_line,
+                    .function = header.source_function,
+            };
+        }
+    };
+
+    template <size_t MaxRecordSize>
+    inline constexpr bool valid_record_slot_v =
+            payload_capacity_for_record_slot_limit(MaxRecordSize).has_value() &&
+            sizeof(basic_record_slot<MaxRecordSize>) <= record_slot_storage_size(MaxRecordSize);
+
+    using runtime_record_slot = basic_record_slot<options::default_max_record_size>;
+
+    enum class runtime_record_limit_result : uint8_t {
+        supported = 0,
+        too_small = 1,
+        exceeds_runtime_slot = 2,
+    };
+
+    inline constexpr runtime_record_limit_result runtime_record_limit_status(size_t max_record_size) noexcept {
+        auto max_message_size = max_message_size_for_record_limit(max_record_size);
+        if (!max_message_size.has_value())
+            return runtime_record_limit_result::too_small;
+
+        if (*max_message_size > runtime_record_slot::payload_capacity)
+            return runtime_record_limit_result::exceeds_runtime_slot;
+
+        return runtime_record_limit_result::supported;
+    }
+
+    inline constexpr std::optional<size_t> max_message_size_for_runtime_record_limit(size_t max_record_size) noexcept {
+        auto max_message_size = max_message_size_for_record_limit(max_record_size);
+        if (!max_message_size.has_value())
+            return std::nullopt;
+
+        if (*max_message_size > runtime_record_slot::payload_capacity)
+            return std::nullopt;
+
+        return max_message_size;
+    }
+
+    template <size_t MaxRecordSize, typename... Arg>
+    inline record_slot_write_result write_record_slot(
+            basic_record_slot<MaxRecordSize>& slot,
+            channel_id channel,
+            log_level level,
+            uint64_t timestamp,
+            uint64_t thread_id,
+            uint64_t sequence,
+            const ::un::log::detail::source_loc& source_location,
+            OverflowPolicy overflow_policy,
+            size_t payload_limit,
+            fmt::format_string<Arg...> format,
+            Arg&&... args) {
+
+        slot.reset(channel, level, timestamp, thread_id, sequence, source_location);
+        auto effective_limit = std::min(payload_limit, slot.capacity());
+
+        auto result = fmt::format_to_n(slot.payload_data(), effective_limit, format, std::forward<Arg>(args)...);
+        auto required_size = static_cast<size_t>(result.size);
+
+        if (required_size <= effective_limit) {
+            slot.header.payload_size = static_cast<uint32_t>(required_size);
+            return record_slot_write_result::written;
+        }
+
+        if (overflow_policy == OverflowPolicy::drop) {
+            slot.header.payload_size = 0;
+            return record_slot_write_result::dropped;
+        }
+
+        slot.header.payload_size = static_cast<uint32_t>(effective_limit);
+        slot.header.truncated = true;
+        slot_detail::write_truncate_marker(slot.payload_data(), effective_limit);
+        return record_slot_write_result::truncated;
+    }
+
+    template <size_t MaxRecordSize, typename... Arg>
+    inline record_slot_write_result write_record_slot(
+            basic_record_slot<MaxRecordSize>& slot,
+            channel_id channel,
+            log_level level,
+            uint64_t timestamp,
+            uint64_t thread_id,
+            uint64_t sequence,
+            const ::un::log::detail::source_loc& source_location,
+            OverflowPolicy overflow_policy,
+            fmt::format_string<Arg...> format,
+            Arg&&... args) {
+        return write_record_slot(
+                slot,
+                channel,
+                level,
+                timestamp,
+                thread_id,
+                sequence,
+                source_location,
+                overflow_policy,
+                slot.capacity(),
+                format,
+                std::forward<Arg>(args)...);
     }
 
     inline void clear_commit(record_header& header) noexcept {

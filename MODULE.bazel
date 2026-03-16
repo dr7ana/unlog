@@ -9,7 +9,7 @@ bazel_dep(name = "catch2", version = "3.11.0")
 bazel_dep(name = "utl", version = "0.1.0")
 git_override(
     module_name = "utl",
-    commit = "c802a77b5e355b7cd3dfed33a6effbabab610d78",
+    commit = "397303af6532bbf1e3dabcd2209736d8e6d71a1d",
     init_submodules = True,
     remote = "https://github.com/dr7ana/utl",
 )
