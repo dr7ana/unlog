@@ -8,6 +8,7 @@
 #include <concepts>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -97,6 +98,15 @@ namespace un::log {
             std::string target_key;
         };
 
+        using runtime_queue_producer = backend::runtime_queue_producer;
+
+        struct queue_producer_registry {
+            std::mutex mutex;
+            std::vector<std::unique_ptr<runtime_queue_producer>> producers;
+        };
+
+        enum class runtime_lifecycle : uint8_t { uninitialized, initialized, shutting_down, shut_down };
+
         struct runtime_state {
             std::unordered_map<std::string, channel_id> channel_ids;
             std::deque<channel_state> channels;
@@ -121,11 +131,118 @@ namespace un::log {
             std::atomic<uint64_t> flush_requested{0};
             std::atomic<uint64_t> flush_completed{0};
             std::unique_ptr<backend::runtime_queue_producer> single_threaded_producer;
+            queue_producer_registry producer_registry;
         };
 
+        struct runtime_control {
+            std::mutex mutex;
+            std::atomic<runtime_state*> state{nullptr};
+            std::atomic<runtime_lifecycle> lifecycle{runtime_lifecycle::uninitialized};
+            std::atomic<uint64_t> generation{0};
+            bool process_exit_hook_registered{false};
+        };
+
+        static runtime_control& access_control() {
+            static runtime_control control;
+            return control;
+        }
+
+        static runtime_state* try_access_state() noexcept {
+            return access_control().state.load(std::memory_order_acquire);
+        }
+
         static runtime_state& access_state() {
-            static runtime_state instance;
-            return instance;
+            auto* state = try_access_state();
+            if (!state) {
+                throw std::logic_error{"runtime state is not initialized"};
+            }
+
+            return *state;
+        }
+
+        static runtime_state& ensure_state_created_locked(runtime_control& control) {
+            auto lifecycle = control.lifecycle.load(std::memory_order_acquire);
+            if (lifecycle == runtime_lifecycle::shutting_down || lifecycle == runtime_lifecycle::shut_down) {
+                throw std::invalid_argument{"runtime is shut down; cannot reinitialize"};
+            }
+
+            auto* state = control.state.load(std::memory_order_acquire);
+            if (!state) {
+                state = new runtime_state{};
+                control.state.store(state, std::memory_order_release);
+                control.lifecycle.store(runtime_lifecycle::initialized, std::memory_order_release);
+                control.generation.fetch_add(1, std::memory_order_acq_rel);
+            }
+
+            return *state;
+        }
+
+        static void shutdown_runtime_state(runtime_state& runtime) noexcept {
+            if (!runtime.consumer_started) {
+                return;
+            }
+
+            {
+                std::lock_guard lock{runtime.runtime_mutex};
+                runtime.stop_requested = true;
+            }
+
+            runtime.consumer_cv.notify_all();
+            if (runtime.consumer_thread.joinable()) {
+                runtime.consumer_thread.join();
+            }
+
+            runtime.consumer_started = false;
+            runtime.stop_requested = false;
+        }
+
+        static void destroy_runtime(runtime_lifecycle final_lifecycle) noexcept {
+            auto& control = access_control();
+            auto* state = static_cast<runtime_state*>(nullptr);
+
+            {
+                std::lock_guard lock{control.mutex};
+                auto lifecycle = control.lifecycle.load(std::memory_order_acquire);
+                if (lifecycle == runtime_lifecycle::shutting_down) {
+                    return;
+                }
+
+                state = control.state.load(std::memory_order_acquire);
+                if (!state) {
+                    control.lifecycle.store(final_lifecycle, std::memory_order_release);
+                    return;
+                }
+
+                control.lifecycle.store(runtime_lifecycle::shutting_down, std::memory_order_release);
+            }
+
+            shutdown_runtime_state(*state);
+
+            {
+                std::lock_guard lock{control.mutex};
+                control.state.store(nullptr, std::memory_order_release);
+                control.lifecycle.store(final_lifecycle, std::memory_order_release);
+            }
+
+            delete state;
+        }
+
+        static void shutdown_runtime_for_process_exit() noexcept {
+            destroy_runtime(runtime_lifecycle::shut_down);
+        }
+
+        static void register_process_exit_hook_locked(runtime_control& control) {
+            if (control.process_exit_hook_registered) {
+                return;
+            }
+
+            std::atexit(&shutdown_runtime_for_process_exit);
+            control.process_exit_hook_registered = true;
+        }
+
+        static bool runtime_is_shutting_down() noexcept {
+            auto lifecycle = access_control().lifecycle.load(std::memory_order_acquire);
+            return lifecycle == runtime_lifecycle::shutting_down || lifecycle == runtime_lifecycle::shut_down;
         }
 
         static channel_state* find_channel_state(runtime_state& st, channel_id id) noexcept {
@@ -270,31 +387,17 @@ namespace un::log {
                     });
         }
 
-        using runtime_queue_producer = backend::runtime_queue_producer;
-
-        struct queue_producer_registry {
-            std::mutex mutex;
-            std::vector<std::unique_ptr<runtime_queue_producer>> producers;
-        };
-
-        static queue_producer_registry& runtime_queue_registry() {
-            static queue_producer_registry registry;
-            return registry;
-        }
-
         static uint64_t current_thread_id() {
             return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
         }
 
-        static void reconfigure_runtime_queue_producers(size_t thread_bufsize) {
-            auto& st = access_state();
+        static void reconfigure_runtime_queue_producers(runtime_state& st, size_t thread_bufsize) {
             if (st.single_threaded_producer) {
                 st.single_threaded_producer->reconfigure(thread_bufsize);
             }
 
-            auto& registry = runtime_queue_registry();
-            std::lock_guard lock{registry.mutex};
-            for (auto& producer : registry.producers) {
+            std::lock_guard lock{st.producer_registry.mutex};
+            for (auto& producer : st.producer_registry.producers) {
                 producer->reconfigure(thread_bufsize);
             }
         }
@@ -305,17 +408,19 @@ namespace un::log {
             }
 
             validate_global_config(st.global);
-            reconfigure_runtime_queue_producers(st.global.thread_bufsize);
+            if (st.global.mode == RuntimeMode::single_threaded && !st.single_threaded_producer) {
+                st.single_threaded_producer =
+                        std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize);
+            }
+            reconfigure_runtime_queue_producers(st, st.global.thread_bufsize);
             st.global_config_locked = true;
         }
 
-        static runtime_queue_producer& register_runtime_queue_producer() {
-            auto& st = access_state();
-            auto& registry = runtime_queue_registry();
-            std::lock_guard lock{registry.mutex};
-            registry.producers.push_back(
+        static runtime_queue_producer& register_runtime_queue_producer(runtime_state& st) {
+            std::lock_guard lock{st.producer_registry.mutex};
+            st.producer_registry.producers.push_back(
                     std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize));
-            return *registry.producers.back();
+            return *st.producer_registry.producers.back();
         }
 
         static runtime_queue_producer& single_threaded_runtime_queue_producer() {
@@ -329,43 +434,42 @@ namespace un::log {
         }
 
         static std::vector<runtime_queue_producer*> runtime_queue_producer_snapshot() {
-            auto& st = access_state();
-            if (st.global.mode == RuntimeMode::single_threaded) {
+            auto* st = try_access_state();
+            if (!st) {
+                return {};
+            }
+
+            if (st->global.mode == RuntimeMode::single_threaded) {
                 return {&single_threaded_runtime_queue_producer()};
             }
 
-            auto& registry = runtime_queue_registry();
-            std::lock_guard lock{registry.mutex};
-            return registry.producers | std::views::transform([](auto&& producer) { return producer.get(); }) |
+            std::lock_guard lock{st->producer_registry.mutex};
+            return st->producer_registry.producers |
+                   std::views::transform([](const auto& producer) { return producer.get(); }) |
                    std::ranges::to<std::vector>();
         }
 
         struct tls_runtime_queue_state {
-            tls_runtime_queue_state() : producer{&register_runtime_queue_producer()} {}
-
+            runtime_state* owner{nullptr};
+            uint64_t generation{0};
             runtime_queue_producer* producer{nullptr};
         };
 
         backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode) {
+            auto& st = access_state();
             if (runtime_mode == RuntimeMode::single_threaded) {
                 return single_threaded_runtime_queue_producer();
             }
 
             static thread_local tls_runtime_queue_state tls_state;
+            auto generation = access_control().generation.load(std::memory_order_acquire);
+            if (tls_state.owner != &st || tls_state.generation != generation || !tls_state.producer) {
+                tls_state.owner = &st;
+                tls_state.generation = generation;
+                tls_state.producer = &register_runtime_queue_producer(st);
+            }
+
             return *tls_state.producer;
-        }
-
-        static void reset_runtime_queue_producers_for_test() {
-            auto& st = access_state();
-            if (st.single_threaded_producer) {
-                st.single_threaded_producer->reset_for_test();
-            }
-
-            auto& registry = runtime_queue_registry();
-            std::lock_guard lock{registry.mutex};
-            for (auto& producer : registry.producers) {
-                producer->reset_for_test();
-            }
         }
 
         auto runtime_startup_steady_time = std::chrono::steady_clock::now();
@@ -493,6 +597,7 @@ namespace un::log {
 
                 auto requested = runtime.flush_requested.load(std::memory_order_acquire);
                 if (requested != runtime.flush_completed.load(std::memory_order_acquire)) {
+                    drain_runtime_queues(runtime);
                     flush_runtime_sinks(runtime);
                     runtime.flush_completed.store(requested, std::memory_order_release);
                     runtime.consumer_cv.notify_all();
@@ -524,7 +629,7 @@ namespace un::log {
 
             runtime.stop_requested = false;
             // std::thread stores args by value after decay, so use std::ref
-            runtime.consumer_thread = std::thread{consumer_main, std::ref(access_state())};
+            runtime.consumer_thread = std::thread{consumer_main, std::ref(runtime)};
             runtime.consumer_started = true;
         }
 
@@ -534,17 +639,19 @@ namespace un::log {
         }
 
         void mark_runtime_active_after_commit() noexcept {
-            auto& st = access_state();
-            auto expected = false;
-            if (st.is_active.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-                st.consumer_cv.notify_one();
+            if (auto* st = try_access_state()) {
+                auto expected = false;
+                if (st->is_active.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+                    st->consumer_cv.notify_one();
+                }
             }
         }
 
         void note_runtime_work_available() noexcept {
-            auto& st = access_state();
-            st.work_generation.fetch_add(1, std::memory_order_release);
-            st.consumer_cv.notify_one();
+            if (auto* st = try_access_state()) {
+                st->work_generation.fetch_add(1, std::memory_order_release);
+                st->consumer_cv.notify_one();
+            }
         }
 
         static channel make_channel_route_locked(
@@ -617,13 +724,18 @@ namespace un::log {
         }
 
         log_level get_default_level() {
-            auto& st = access_state();
+            if (auto* st = try_access_state()) {
+                return st->default_level;
+            }
 
-            return st.default_level;
+            return log_level::info;
         }
 
         void set_default_level(log_level level) {
-            auto& st = access_state();
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
 
             st.default_level = level;
 
@@ -633,12 +745,18 @@ namespace un::log {
         }
 
         channel make_channel_route(channel_registration registration, bool make_default) {
-            auto& st = access_state();
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
             return make_channel_route_locked(st, std::move(registration), make_default, false);
         }
 
         void add_sink_route(sink_ptr sink, ClockType timestamp_mode, std::string_view format) {
-            auto& st = access_state();
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
 
             if (st.is_active.load(std::memory_order_relaxed)) {
                 throw std::invalid_argument{"runtime is active; cannot add sinks"};
@@ -650,7 +768,7 @@ namespace un::log {
             ensure_global_config_locked(st);
             set_runtime_clock_type(st, timestamp_mode);
 
-            std::lock_guard lock{st.runtime_mutex};
+            std::lock_guard runtime_lock{st.runtime_mutex};
             st.custom_sinks.push_back(
                     backend::sink_entry{
                             .sink = std::move(sink),
@@ -659,17 +777,17 @@ namespace un::log {
         }
 
         void flush_backend() {
-            auto& st = access_state();
-            if (!st.consumer_started) {
+            auto* st = try_access_state();
+            if (!st || !st->consumer_started) {
                 return;
             }
 
-            auto target = st.flush_requested.fetch_add(1, std::memory_order_acq_rel) + 1u;
-            st.consumer_cv.notify_one();
+            auto target = st->flush_requested.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            st->consumer_cv.notify_one();
 
-            std::unique_lock lock{st.runtime_mutex};
-            st.consumer_cv.wait(
-                    lock, [&st, target] { return st.flush_completed.load(std::memory_order_acquire) >= target; });
+            std::unique_lock lock{st->runtime_mutex};
+            st->consumer_cv.wait(
+                    lock, [st, target] { return st->flush_completed.load(std::memory_order_acquire) >= target; });
         }
 
         backend::producer_stats backend_stats() {
@@ -689,29 +807,39 @@ namespace un::log {
         }
 
         channel_runtime_view channel_runtime_view_for(channel_id id) noexcept {
-            auto& st = access_state();
-            auto* state = find_channel_state(st, id);
+            if (runtime_is_shutting_down()) {
+                return {};
+            }
+
+            auto* st = try_access_state();
+            if (!st) {
+                return {};
+            }
+
+            auto* state = find_channel_state(*st, id);
             if (!state) {
                 return {};
             }
 
             auto view = state->runtime_view();
-            view.runtime_mode = st.global.mode;
-            view.clock_now_fn = st.clock_now_fn;
+            view.runtime_mode = st->global.mode;
+            view.clock_now_fn = st->clock_now_fn;
             return view;
         }
 
         void set_channel_level(channel_id id, log_level level) noexcept {
-            auto& st = access_state();
-            if (auto* state = find_channel_state(st, id)) {
-                state->set_level(level);
+            if (auto* st = try_access_state()) {
+                if (auto* state = find_channel_state(*st, id)) {
+                    state->set_level(level);
+                }
             }
         }
 
         log_level channel_level(channel_id id) noexcept {
-            auto& st = access_state();
-            if (auto* state = find_channel_state(st, id)) {
-                return state->level();
+            if (auto* st = try_access_state()) {
+                if (auto* state = find_channel_state(*st, id)) {
+                    return state->level();
+                }
             }
 
             return log_level::off;
@@ -725,11 +853,15 @@ namespace un::log {
                 return;
             }
 
-            auto& st = detail::access_state();
-            auto ready = st.consumer_started || !st.channels.empty();
+            auto* st = detail::try_access_state();
+            if (!st) {
+                return;
+            }
+
+            auto ready = st->consumer_started || !st->channels.empty();
             if (!ready) {
-                std::lock_guard lock{st.runtime_mutex};
-                ready = !st.configured_sinks.empty() || !st.custom_sinks.empty();
+                std::lock_guard lock{st->runtime_mutex};
+                ready = !st->configured_sinks.empty() || !st->custom_sinks.empty();
             }
 
             if (!ready) {
@@ -740,51 +872,27 @@ namespace un::log {
         }
 
         bool consumer_thread_started() {
-            auto& st = detail::access_state();
-            return st.consumer_started;
+            if (auto* st = detail::try_access_state()) {
+                return st->consumer_started;
+            }
+
+            return false;
         }
 
         void reset_runtime_for_test() {
-            auto& st = detail::access_state();
-
-            if (st.consumer_started) {
-                {
-                    std::lock_guard lock{st.runtime_mutex};
-                    st.stop_requested = true;
-                }
-                st.consumer_cv.notify_all();
-                if (st.consumer_thread.joinable()) {
-                    st.consumer_thread.join();
-                }
-                st.consumer_started = false;
-                st.stop_requested = false;
-            }
-
-            st.channel_ids.clear();
-            st.channels.clear();
-            st.default_channel_id.reset();
-            {
-                std::lock_guard lock{st.runtime_mutex};
-                st.configured_sinks.clear();
-                st.custom_sinks.clear();
-            }
-            st.global = {};
-            st.global_config_locked = false;
-            st.clock_type = ClockType::steady;
-            st.clock_type_set = false;
-            st.clock_now_fn = detail::clock_now_fn_for<ClockType::steady>();
-            st.default_level = log_level::info;
-            st.is_active.store(false, std::memory_order_relaxed);
-            st.work_generation.store(0, std::memory_order_relaxed);
-            st.flush_requested.store(0, std::memory_order_relaxed);
-            st.flush_completed.store(0, std::memory_order_relaxed);
-            detail::reconfigure_runtime_queue_producers(st.global.thread_bufsize);
-            detail::reset_runtime_queue_producers_for_test();
+            detail::destroy_runtime(detail::runtime_lifecycle::uninitialized);
         }
     }  // namespace test
 
     channel global_channel() {
-        auto& st = detail::access_state();
+        if (detail::runtime_is_shutting_down()) {
+            return {};
+        }
+
+        auto& control = detail::access_control();
+        std::lock_guard lock{control.mutex};
+        auto& st = detail::ensure_state_created_locked(control);
+        detail::register_process_exit_hook_locked(control);
         detail::ensure_default_channel(st);
 
         if (!st.default_channel_id.has_value()) {
@@ -795,8 +903,10 @@ namespace un::log {
     }
 
     void set_global_config(global_config cfg) {
-        auto& st = detail::access_state();
-        std::lock_guard lock{st.runtime_mutex};
+        auto& control = detail::access_control();
+        std::lock_guard lock{control.mutex};
+        auto& st = detail::ensure_state_created_locked(control);
+        detail::register_process_exit_hook_locked(control);
 
         if (st.global_config_locked || st.is_active.load(std::memory_order_relaxed)) {
             throw std::invalid_argument{"global config is locked; cannot reconfigure"};
@@ -804,13 +914,16 @@ namespace un::log {
 
         detail::validate_global_config(cfg);
         st.global = cfg;
-        detail::reconfigure_runtime_queue_producers(cfg.thread_bufsize);
+        detail::reconfigure_runtime_queue_producers(st, cfg.thread_bufsize);
     }
 
     global_config get_global_config() {
-        auto& st = detail::access_state();
-        std::lock_guard lock{st.runtime_mutex};
-        return st.global;
+        if (auto* st = detail::try_access_state()) {
+            std::lock_guard lock{st->runtime_mutex};
+            return st->global;
+        }
+
+        return {};
     }
 
     void flush() {
