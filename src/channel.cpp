@@ -103,6 +103,7 @@ namespace un::log {
         struct queue_producer_registry {
             std::mutex mutex;
             std::vector<std::unique_ptr<runtime_queue_producer>> producers;
+            std::vector<std::unique_ptr<backend::producer_active_word>> active_words;
         };
 
         enum class runtime_lifecycle : uint8_t { uninitialized, initialized, shutting_down, shut_down };
@@ -127,7 +128,6 @@ namespace un::log {
             std::thread consumer_thread;
             bool consumer_started{false};
             bool stop_requested{false};
-            std::atomic<uint64_t> work_generation{0};
             std::atomic<uint64_t> flush_requested{0};
             std::atomic<uint64_t> flush_completed{0};
             std::unique_ptr<backend::runtime_queue_producer> single_threaded_producer;
@@ -418,8 +418,16 @@ namespace un::log {
 
         static runtime_queue_producer& register_runtime_queue_producer(runtime_state& st) {
             std::lock_guard lock{st.producer_registry.mutex};
-            st.producer_registry.producers.push_back(
-                    std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize));
+            auto producer_index = st.producer_registry.producers.size();
+            auto required_word_count = producer_index / size_t{64} + size_t{1};
+            while (st.producer_registry.active_words.size() < required_word_count) {
+                st.producer_registry.active_words.push_back(std::make_unique<backend::producer_active_word>());
+            }
+
+            auto producer = std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize);
+            producer->bind_active_word(
+                    st.producer_registry.active_words[producer_index / size_t{64}].get(), producer_index);
+            st.producer_registry.producers.push_back(std::move(producer));
             return *st.producer_registry.producers.back();
         }
 
@@ -433,34 +441,13 @@ namespace un::log {
             return *st.single_threaded_producer;
         }
 
-        static std::vector<runtime_queue_producer*> runtime_queue_producer_snapshot() {
-            auto* st = try_access_state();
-            if (!st) {
-                return {};
-            }
-
-            if (st->global.mode == RuntimeMode::single_threaded) {
-                return {&single_threaded_runtime_queue_producer()};
-            }
-
-            std::lock_guard lock{st->producer_registry.mutex};
-            return st->producer_registry.producers |
-                   std::views::transform([](const auto& producer) { return producer.get(); }) |
-                   std::ranges::to<std::vector>();
-        }
-
         struct tls_runtime_queue_state {
             runtime_state* owner{nullptr};
             uint64_t generation{0};
             runtime_queue_producer* producer{nullptr};
         };
 
-        backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode) {
-            auto& st = access_state();
-            if (runtime_mode == RuntimeMode::single_threaded) {
-                return single_threaded_runtime_queue_producer();
-            }
-
+        static runtime_queue_producer& ensure_threadsafe_runtime_queue_producer(runtime_state& st) {
             static thread_local tls_runtime_queue_state tls_state;
             auto generation = access_control().generation.load(std::memory_order_acquire);
             if (tls_state.owner != &st || tls_state.generation != generation || !tls_state.producer) {
@@ -470,6 +457,69 @@ namespace un::log {
             }
 
             return *tls_state.producer;
+        }
+
+        backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode) {
+            auto& st = access_state();
+            if (runtime_mode == RuntimeMode::single_threaded) {
+                return single_threaded_runtime_queue_producer();
+            }
+
+            return ensure_threadsafe_runtime_queue_producer(st);
+        }
+
+        static std::vector<runtime_queue_producer*> runtime_queue_producer_snapshot() {
+            auto* st = try_access_state();
+            if (!st) {
+                return {};
+            }
+
+            if (st->global.mode == RuntimeMode::single_threaded) {
+                if (!st->single_threaded_producer) {
+                    return {};
+                }
+
+                return {st->single_threaded_producer.get()};
+            }
+
+            std::lock_guard lock{st->producer_registry.mutex};
+            return st->producer_registry.producers |
+                   std::views::transform([](const auto& producer) { return producer.get(); }) |
+                   std::ranges::to<std::vector>();
+        }
+
+        static std::vector<runtime_queue_producer*> active_runtime_queue_producer_snapshot(runtime_state& runtime) {
+            std::lock_guard lock{runtime.producer_registry.mutex};
+
+            auto snapshot = std::vector<runtime_queue_producer*>{};
+            for (size_t word_index = 0; word_index < runtime.producer_registry.active_words.size(); ++word_index) {
+                auto pending = runtime.producer_registry.active_words[word_index]->bits.load(std::memory_order_acquire);
+                while (pending != 0) {
+                    auto bit_index = static_cast<size_t>(std::countr_zero(pending));
+                    auto producer_index = word_index * size_t{64} + bit_index;
+                    if (producer_index < runtime.producer_registry.producers.size()) {
+                        snapshot.push_back(runtime.producer_registry.producers[producer_index].get());
+                    }
+                    pending &= pending - uint64_t{1};
+                }
+            }
+
+            return snapshot;
+        }
+
+        static bool runtime_has_pending_work(runtime_state& runtime) {
+            if (runtime.global.mode == RuntimeMode::single_threaded) {
+                return runtime.single_threaded_producer && !runtime.single_threaded_producer->queue().empty();
+            }
+
+            std::lock_guard lock{runtime.producer_registry.mutex};
+            for (const auto& word : runtime.producer_registry.active_words) {
+                if (word->bits.load(std::memory_order_acquire) != 0) {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         auto runtime_startup_steady_time = std::chrono::steady_clock::now();
@@ -549,26 +599,67 @@ namespace un::log {
             }
         }
 
+        static size_t drain_runtime_queue_producer(runtime_state& runtime, runtime_queue_producer& producer) {
+            auto drained_total = size_t{0};
+
+            for (;;) {
+                auto drained_pass = producer.queue().consume_all(
+                        [&runtime](backend::runtime_record_slot& slot) { emit_runtime_slot(runtime, slot); });
+                drained_total += drained_pass;
+                if (drained_pass != 0) {
+                    continue;
+                }
+
+                producer.clear_active_published();
+                if (auto* active_word = producer.active_word()) {
+                    active_word->bits.fetch_and(~producer.active_bit_mask(), std::memory_order_acq_rel);
+                }
+
+                if (!producer.queue().empty()) {
+                    if (producer.try_mark_active_published()) {
+                        if (auto* active_word = producer.active_word()) {
+                            active_word->bits.fetch_or(producer.active_bit_mask(), std::memory_order_release);
+                        }
+                    }
+                    continue;
+                }
+
+                return drained_total;
+            }
+        }
+
         static size_t drain_runtime_queues(runtime_state& runtime) {
             auto drained_total = size_t{0};
 
             for (;;) {
-                auto producer_snapshot = runtime_queue_producer_snapshot();
-                auto drained_pass = size_t{0};
+                if (runtime.global.mode == RuntimeMode::single_threaded) {
+                    if (!runtime.single_threaded_producer) {
+                        return drained_total;
+                    }
 
+                    auto drained_pass = drain_runtime_queue_producer(runtime, *runtime.single_threaded_producer);
+                    drained_total += drained_pass;
+                    if (drained_pass == 0) {
+                        return drained_total;
+                    }
+                    continue;
+                }
+
+                auto producer_snapshot = active_runtime_queue_producer_snapshot(runtime);
+                if (producer_snapshot.empty()) {
+                    return drained_total;
+                }
+
+                auto drained_pass = size_t{0};
                 for (auto* producer : producer_snapshot) {
                     if (!producer) {
                         continue;
                     }
 
-                    drained_pass += producer->queue().consume_all(
-                            [&runtime](backend::runtime_record_slot& slot) { emit_runtime_slot(runtime, slot); });
+                    drained_pass += drain_runtime_queue_producer(runtime, *producer);
                 }
 
                 drained_total += drained_pass;
-                if (drained_pass == 0) {
-                    return drained_total;
-                }
             }
         }
 
@@ -590,8 +681,6 @@ namespace un::log {
         }
 
         static void consumer_main(runtime_state& runtime) {
-            auto observed_work = runtime.work_generation.load(std::memory_order_acquire);
-
             for (;;) {
                 drain_runtime_queues(runtime);
 
@@ -609,13 +698,12 @@ namespace un::log {
                     break;
                 }
 
-                runtime.consumer_cv.wait(lock, [&runtime, &observed_work] {
+                runtime.consumer_cv.wait(lock, [&runtime] {
                     return runtime.stop_requested ||
                            runtime.flush_requested.load(std::memory_order_acquire) !=
                                    runtime.flush_completed.load(std::memory_order_acquire) ||
-                           runtime.work_generation.load(std::memory_order_acquire) != observed_work;
+                           runtime_has_pending_work(runtime);
                 });
-                observed_work = runtime.work_generation.load(std::memory_order_acquire);
             }
 
             drain_runtime_queues(runtime);
@@ -636,6 +724,9 @@ namespace un::log {
         static void ensure_runtime_initialized_locked(runtime_state& st) {
             ensure_global_config_locked(st);
             ensure_consumer_started_locked(st);
+            if (st.global.mode == RuntimeMode::threadsafe) {
+                [[maybe_unused]] auto& producer = ensure_threadsafe_runtime_queue_producer(st);
+            }
         }
 
         void mark_runtime_active_after_commit() noexcept {
@@ -647,9 +738,17 @@ namespace un::log {
             }
         }
 
-        void note_runtime_work_available() noexcept {
+        void note_runtime_work_available(runtime_queue_producer& producer, RuntimeMode runtime_mode) noexcept {
+            if (!producer.try_mark_active_published()) {
+                return;
+            }
+
             if (auto* st = try_access_state()) {
-                st->work_generation.fetch_add(1, std::memory_order_release);
+                if (runtime_mode == RuntimeMode::threadsafe) {
+                    if (auto* active_word = producer.active_word()) {
+                        active_word->bits.fetch_or(producer.active_bit_mask(), std::memory_order_release);
+                    }
+                }
                 st->consumer_cv.notify_one();
             }
         }

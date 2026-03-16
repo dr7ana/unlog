@@ -38,7 +38,7 @@ namespace un::log {
         }
 
         backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode);
-        void note_runtime_work_available() noexcept;
+        void note_runtime_work_available(backend::runtime_queue_producer& producer, RuntimeMode runtime_mode) noexcept;
         void mark_runtime_active_after_commit() noexcept;
 
         template <typename... Arg>
@@ -91,7 +91,7 @@ namespace un::log {
                 producer.count_truncated();
             }
 
-            note_runtime_work_available();
+            note_runtime_work_available(producer, runtime_mode);
             mark_runtime_active_after_commit();
         }
 

@@ -14,15 +14,21 @@
 
 namespace un::log::backend {
 
+    struct producer_active_word {
+        alignas(64) std::atomic<uint64_t> bits{0};
+    };
+
     inline constexpr std::optional<size_t> queue_slot_capacity_for(
             size_t thread_buffer_size, size_t record_slot_size) noexcept {
-        if (record_slot_size == 0 || thread_buffer_size < record_slot_size)
+        if (record_slot_size == 0 || thread_buffer_size < record_slot_size) {
             return std::nullopt;
+        }
 
         auto slots = thread_buffer_size / record_slot_size;
         auto capacity = std::bit_floor(slots);
-        if (capacity == 0)
+        if (capacity == 0) {
             return std::nullopt;
+        }
 
         return capacity;
     }
@@ -56,10 +62,33 @@ namespace un::log::backend {
         [[nodiscard]] const queue_type& queue() const noexcept { return *queue_; }
 
         [[nodiscard]] uint64_t next_sequence() noexcept { return sequence_++; }
+        [[nodiscard]] producer_active_word* active_word() const noexcept { return active_word_; }
+        [[nodiscard]] size_t active_index() const noexcept { return active_index_; }
+        [[nodiscard]] size_t active_word_index() const noexcept { return active_word_index_; }
+        [[nodiscard]] uint64_t active_bit_mask() const noexcept { return active_bit_mask_; }
 
         void count_emitted() noexcept { emitted_.fetch_add(1, std::memory_order_relaxed); }
         void count_dropped() noexcept { dropped_.fetch_add(1, std::memory_order_relaxed); }
         void count_truncated() noexcept { truncated_.fetch_add(1, std::memory_order_relaxed); }
+
+        void bind_active_word(producer_active_word* active_word, size_t active_index) noexcept {
+            active_word_ = active_word;
+            active_index_ = active_index;
+            active_word_index_ = active_index / 64u;
+            active_bit_mask_ = uint64_t{1} << (active_index % 64u);
+        }
+
+        [[nodiscard]] bool try_mark_active_published() noexcept {
+            auto expected = false;
+            return active_published_.compare_exchange_strong(
+                    expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
+        }
+
+        void clear_active_published() noexcept { active_published_.store(false, std::memory_order_release); }
+
+        [[nodiscard]] bool active_published() const noexcept {
+            return active_published_.load(std::memory_order_acquire);
+        }
 
         [[nodiscard]] producer_stats stats() const noexcept {
             return producer_stats{
@@ -71,29 +100,38 @@ namespace un::log::backend {
 
         void reconfigure(size_t thread_buffer_size) {
             auto queue_capacity = traits::queue_capacity_for(thread_buffer_size);
-            if (!queue_capacity.has_value())
+            if (!queue_capacity.has_value()) {
                 throw std::invalid_argument{"global thread_bufsize does not fit one producer record slot"};
+            }
 
             queue_.emplace(*queue_capacity);
             sequence_ = 0;
             emitted_.store(0, std::memory_order_relaxed);
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
+            active_published_.store(false, std::memory_order_relaxed);
         }
 
         void reset_for_test() noexcept {
-            if (queue_.has_value())
+            if (queue_.has_value()) {
                 queue_->clear();
+            }
             sequence_ = 0;
             emitted_.store(0, std::memory_order_relaxed);
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
+            active_published_.store(false, std::memory_order_relaxed);
         }
 
       private:
         uint64_t thread_id_{0};
         uint64_t sequence_{0};
+        producer_active_word* active_word_{nullptr};
+        size_t active_index_{0};
+        size_t active_word_index_{0};
+        uint64_t active_bit_mask_{0};
         std::optional<queue_type> queue_{};
+        std::atomic<bool> active_published_{false};
         std::atomic<uint64_t> emitted_{0};
         std::atomic<uint64_t> dropped_{0};
         std::atomic<uint64_t> truncated_{0};
