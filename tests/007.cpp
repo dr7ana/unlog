@@ -49,6 +49,7 @@ namespace un::log::test {
         auto route = make_channel("channel-route");
         REQUIRE(static_cast<bool>(route));
         CHECK(route.name() == "channel-route"sv);
+        CHECK(consumer_thread_started() == true);
 
         unlog::info(route, "channel-message");
         unlog::flush();
@@ -131,10 +132,12 @@ namespace un::log::test {
         make_channel(cfg, true);
 
         CHECK(runtime_ready() == true);
+        CHECK(consumer_thread_started() == true);
 
         reset_runtime_for_test();
 
         CHECK(runtime_ready() == false);
+        CHECK(consumer_thread_started() == false);
         CHECK(get_global_config().mode == RuntimeMode::single_threaded);
         CHECK(get_global_config().thread_bufsize == options::default_thread_bufsize);
     }

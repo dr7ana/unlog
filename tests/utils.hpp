@@ -17,6 +17,7 @@ namespace un::log::test {
     using namespace un::log::literals;
 
     void get_runtime_backend(const std::function<void()>& fn);
+    bool consumer_thread_started();
     void reset_runtime_for_test();
 
     struct test_helper {

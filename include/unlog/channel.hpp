@@ -27,17 +27,19 @@ namespace un::log {
         using clock_now_fn_t = uint64_t (*)() noexcept;
 
         inline constexpr bool level_enabled(log_level message_level, log_level threshold) {
-            if (threshold == log_level::off)
+            if (threshold == log_level::off) {
                 return false;
-            if (message_level == log_level::off)
+            }
+            if (message_level == log_level::off) {
                 return false;
+            }
 
             return static_cast<uint8_t>(message_level) >= static_cast<uint8_t>(threshold);
         }
 
         backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode);
         void note_runtime_work_available() noexcept;
-        void mark_runtime_active_after_commit(uint64_t sequence) noexcept;
+        void mark_runtime_active_after_commit() noexcept;
 
         template <typename... Arg>
         void log_message(
@@ -52,8 +54,9 @@ namespace un::log {
                 log_level level,
                 fmt::format_string<Arg...> format,
                 Arg&&... args) {
-            if (!clock_now_fn || !channel_name)
+            if (!clock_now_fn || !channel_name) {
                 return;
+            }
 
             auto& producer = get_runtime_queue_producer(runtime_mode);
             auto slot = backend::runtime_record_slot{};
@@ -84,11 +87,12 @@ namespace un::log {
             }
 
             producer.count_emitted();
-            if (result == backend::record_slot_write_result::truncated)
+            if (result == backend::record_slot_write_result::truncated) {
                 producer.count_truncated();
+            }
 
             note_runtime_work_available();
-            mark_runtime_active_after_commit(sequence);
+            mark_runtime_active_after_commit();
         }
 
         struct channel_runtime_view {
@@ -107,8 +111,9 @@ namespace un::log {
 
         inline size_t resolve_channel_max_message_size(size_t max_record_size) {
             auto max_message_size = backend::max_message_size_for_runtime_record_limit(max_record_size);
-            if (max_message_size.has_value())
+            if (max_message_size.has_value()) {
                 return *max_message_size;
+            }
 
             switch (backend::runtime_record_limit_status(max_record_size)) {
                 case backend::runtime_record_limit_result::too_small:
@@ -151,16 +156,19 @@ namespace un::log {
                 log_level level,
                 fmt::format_string<Arg...> format,
                 Arg&&... args) const {
-            if (!*this)
+            if (!*this) {
                 return;
+            }
 
             auto view = detail::channel_runtime_view_for(id_);
 
-            if (!detail::level_enabled(level, view.threshold))
+            if (!detail::level_enabled(level, view.threshold)) {
                 return;
+            }
 
-            if (!view.clock_now_fn)
+            if (!view.clock_now_fn) {
                 return;
+            }
 
             detail::log_message(
                     id_,

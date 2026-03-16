@@ -70,8 +70,9 @@ namespace un::log::backend {
             return std::nullopt;
 
         auto max_payload = max_record_size - header_size;
-        while (max_payload > 0 && total_record_size_for_payload(max_payload) > max_record_size)
+        while (max_payload > 0 && total_record_size_for_payload(max_payload) > max_record_size) {
             --max_payload;
+        }
 
         if (total_record_size_for_payload(max_payload) > max_record_size)
             return std::nullopt;
