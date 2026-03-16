@@ -1,5 +1,7 @@
 #include "utils.hpp"
 
+#include <memory>
+
 namespace un::log::test {
 
     TEST_CASE("009 - queue runtime traits derive power-of-two capacity from thread buffer", "[009][queue][traits]") {
@@ -25,7 +27,8 @@ namespace un::log::test {
         };
 
         bool wrote_slot = false;
-        auto produced = producer.queue().produce([&](record_slot_t* slot) noexcept {
+        auto produced = producer.queue().produce([&](record_slot_t* slot) noexcept -> bool {
+            std::construct_at(slot);
             auto result = backend::write_record_slot(
                     *slot,
                     channel_id{9},
@@ -38,6 +41,12 @@ namespace un::log::test {
                     "queue-{}",
                     7);
             wrote_slot = result == backend::record_slot_write_result::written;
+            if (!wrote_slot) {
+                std::destroy_at(slot);
+                return false;
+            }
+
+            return true;
         });
 
         REQUIRE(produced);
@@ -57,6 +66,24 @@ namespace un::log::test {
 
         CHECK(drain_count == 1u);
         CHECK(consumed == 1u);
+        CHECK(producer.queue().empty());
+    }
+
+    TEST_CASE("009 - queue producer callback can cancel publish", "[009][queue][producer]") {
+        using producer_t = backend::queue_producer<256>;
+        using record_slot_t = producer_t::record_slot;
+
+        auto producer = producer_t{42u, 4096u};
+        bool invoked = false;
+        auto produced = producer.queue().produce([&](record_slot_t* slot) noexcept -> bool {
+            invoked = true;
+            std::construct_at(slot);
+            std::destroy_at(slot);
+            return false;
+        });
+
+        CHECK_FALSE(produced);
+        CHECK(invoked);
         CHECK(producer.queue().empty());
     }
 

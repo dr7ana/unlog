@@ -11,6 +11,8 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -41,6 +43,68 @@ namespace un::log {
         void note_runtime_work_available(backend::runtime_queue_producer& producer, RuntimeMode runtime_mode) noexcept;
         void mark_runtime_active_after_commit() noexcept;
 
+        struct produce_record_outcome {
+            bool publish{false};
+            bool truncated{false};
+            std::exception_ptr error{};
+        };
+
+        template <typename... Arg>
+        [[nodiscard]] produce_record_outcome produce_runtime_record(
+                backend::runtime_record_slot* slot,
+                backend::runtime_queue_producer& producer,
+                channel_id channel,
+                log_level level,
+                uint64_t timestamp,
+                uint64_t sequence,
+                size_t payload_limit,
+                bool overflow_drop,
+                const source_loc& source_location,
+                fmt::format_string<Arg...> format,
+                Arg&&... args) noexcept {
+            auto outcome = produce_record_outcome{};
+            auto constructed = false;
+
+            try {
+                std::construct_at(slot);
+                constructed = true;
+
+                auto result = backend::write_record_slot(
+                        *slot,
+                        channel,
+                        level,
+                        timestamp,
+                        producer.thread_id(),
+                        sequence,
+                        source_location,
+                        overflow_drop ? OverflowPolicy::drop : OverflowPolicy::truncate,
+                        payload_limit,
+                        format,
+                        std::forward<Arg>(args)...);
+
+                if (result == backend::record_slot_write_result::written) {
+                    outcome.publish = true;
+                    return outcome;
+                }
+
+                if (result == backend::record_slot_write_result::truncated) {
+                    outcome.publish = true;
+                    outcome.truncated = true;
+                    return outcome;
+                }
+
+                std::destroy_at(slot);
+                return outcome;
+            } catch (...) {
+                if (constructed) {
+                    std::destroy_at(slot);
+                }
+
+                outcome.error = std::current_exception();
+                return outcome;
+            }
+        }
+
         template <typename... Arg>
         void log_message(
                 channel_id channel,
@@ -59,35 +123,37 @@ namespace un::log {
             }
 
             auto& producer = get_runtime_queue_producer(runtime_mode);
-            auto slot = backend::runtime_record_slot{};
             auto timestamp = clock_now_fn();
             auto sequence = producer.next_sequence();
             auto payload_limit = can_truncate ? max_message_size : size_t{0};
-            auto result = backend::write_record_slot(
-                    slot,
-                    channel,
-                    level,
-                    timestamp,
-                    producer.thread_id(),
-                    sequence,
-                    source_location,
-                    overflow_drop ? OverflowPolicy::drop : OverflowPolicy::truncate,
-                    payload_limit,
-                    format,
-                    std::forward<Arg>(args)...);
+            auto outcome = produce_record_outcome{};
+            auto published = producer.queue().produce([&](backend::runtime_record_slot* slot) noexcept -> bool {
+                outcome = produce_runtime_record(
+                        slot,
+                        producer,
+                        channel,
+                        level,
+                        timestamp,
+                        sequence,
+                        payload_limit,
+                        overflow_drop,
+                        source_location,
+                        format,
+                        std::forward<Arg>(args)...);
+                return outcome.publish;
+            });
 
-            if (result == backend::record_slot_write_result::dropped) {
-                producer.count_dropped();
-                return;
+            if (outcome.error) {
+                std::rethrow_exception(outcome.error);
             }
 
-            if (!producer.queue().emplace(std::move(slot))) {
+            if (!published) {
                 producer.count_dropped();
                 return;
             }
 
             producer.count_emitted();
-            if (result == backend::record_slot_write_result::truncated) {
+            if (outcome.truncated) {
                 producer.count_truncated();
             }
 

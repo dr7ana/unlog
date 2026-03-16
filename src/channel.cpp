@@ -124,6 +124,7 @@ namespace un::log {
             std::mutex runtime_mutex;
             std::vector<configured_sink> configured_sinks;
             std::vector<backend::sink_entry> custom_sinks;
+            std::shared_ptr<std::vector<backend::sink_entry>> consumer_sinks;
             std::condition_variable consumer_cv;
             std::thread consumer_thread;
             bool consumer_started{false};
@@ -365,6 +366,7 @@ namespace un::log {
                     registration.output_fd,
                     registration.unix_dgram_path);
 
+            std::lock_guard runtime_lock{st.runtime_mutex};
             auto duplicate = std::ranges::find_if(
                     st.configured_sinks, [&key](const configured_sink& sink) { return sink.target_key == key; });
             if (duplicate != st.configured_sinks.end()) {
@@ -385,6 +387,13 @@ namespace un::log {
                             .sink_type = registration.sink_type,
                             .target_key = std::move(key),
                     });
+            auto snapshot = std::make_shared<std::vector<backend::sink_entry>>();
+            snapshot->reserve(st.configured_sinks.size() + st.custom_sinks.size());
+            std::ranges::copy(
+                    st.configured_sinks | std::views::transform([](const auto& sink) { return sink.entry; }),
+                    std::back_inserter(*snapshot));
+            std::ranges::copy(st.custom_sinks, std::back_inserter(*snapshot));
+            st.consumer_sinks = std::move(snapshot);
         }
 
         static uint64_t current_thread_id() {
@@ -568,24 +577,43 @@ namespace un::log {
             return rec;
         }
 
-        static std::vector<backend::sink_entry> sink_snapshot(runtime_state& runtime) {
-            std::lock_guard lock{runtime.runtime_mutex};
-            auto snapshot = runtime.configured_sinks |
-                            std::views::transform([](const auto& sink) { return sink.entry; }) |
-                            std::ranges::to<std::vector>();
-            std::ranges::copy(runtime.custom_sinks, std::back_inserter(snapshot));
-            return snapshot;
+        struct consumer_scratch {
+            std::vector<backend::line_cache_entry> line_cache;
+        };
+
+        static void rebuild_consumer_sinks_locked(runtime_state& runtime) {
+            auto snapshot = std::make_shared<std::vector<backend::sink_entry>>();
+            snapshot->reserve(runtime.configured_sinks.size() + runtime.custom_sinks.size());
+            std::ranges::copy(
+                    runtime.configured_sinks | std::views::transform([](const auto& sink) { return sink.entry; }),
+                    std::back_inserter(*snapshot));
+            std::ranges::copy(runtime.custom_sinks, std::back_inserter(*snapshot));
+            runtime.consumer_sinks = std::move(snapshot);
         }
 
-        static void emit_runtime_slot(runtime_state& runtime, const backend::runtime_record_slot& slot) {
+        static std::shared_ptr<const std::vector<backend::sink_entry>> sink_snapshot(runtime_state& runtime) {
+            std::lock_guard lock{runtime.runtime_mutex};
+            if (!runtime.consumer_sinks) {
+                rebuild_consumer_sinks_locked(runtime);
+            }
+
+            return runtime.consumer_sinks;
+        }
+
+        static void emit_runtime_slot(
+                runtime_state& runtime,
+                const std::vector<backend::sink_entry>& sinks,
+                consumer_scratch& scratch,
+                const backend::runtime_record_slot& slot) {
             auto rec = make_runtime_log_entry(runtime, slot);
             auto time_context = resolve_runtime_time_context(rec.timestamp, runtime.clock_type);
-            auto sinks = sink_snapshot(runtime);
+            auto& line_cache = scratch.line_cache;
+            line_cache.clear();
+            if (line_cache.capacity() < sinks.size()) {
+                line_cache.reserve(sinks.size());
+            }
 
-            std::vector<backend::line_cache_entry> line_cache;
-            line_cache.reserve(sinks.size());
-
-            for (auto& sink : sinks) {
+            for (const auto& sink : sinks) {
                 auto line = backend::format_cache_line(
                         line_cache,
                         sink.pattern,
@@ -599,12 +627,16 @@ namespace un::log {
             }
         }
 
-        static size_t drain_runtime_queue_producer(runtime_state& runtime, runtime_queue_producer& producer) {
+        static size_t drain_runtime_queue_producer(
+                runtime_state& runtime,
+                const std::vector<backend::sink_entry>& sinks,
+                consumer_scratch& scratch,
+                runtime_queue_producer& producer) {
             auto drained_total = size_t{0};
 
             for (;;) {
                 auto drained_pass = producer.queue().consume_all(
-                        [&runtime](backend::runtime_record_slot& slot) { emit_runtime_slot(runtime, slot); });
+                        [&](backend::runtime_record_slot& slot) { emit_runtime_slot(runtime, sinks, scratch, slot); });
                 drained_total += drained_pass;
                 if (drained_pass != 0) {
                     continue;
@@ -628,16 +660,19 @@ namespace un::log {
             }
         }
 
-        static size_t drain_runtime_queues(runtime_state& runtime) {
+        static size_t drain_runtime_queues(runtime_state& runtime, consumer_scratch& scratch) {
             auto drained_total = size_t{0};
 
             for (;;) {
+                auto sinks = sink_snapshot(runtime);
+
                 if (runtime.global.mode == RuntimeMode::single_threaded) {
                     if (!runtime.single_threaded_producer) {
                         return drained_total;
                     }
 
-                    auto drained_pass = drain_runtime_queue_producer(runtime, *runtime.single_threaded_producer);
+                    auto drained_pass =
+                            drain_runtime_queue_producer(runtime, *sinks, scratch, *runtime.single_threaded_producer);
                     drained_total += drained_pass;
                     if (drained_pass == 0) {
                         return drained_total;
@@ -656,7 +691,7 @@ namespace un::log {
                         continue;
                     }
 
-                    drained_pass += drain_runtime_queue_producer(runtime, *producer);
+                    drained_pass += drain_runtime_queue_producer(runtime, *sinks, scratch, *producer);
                 }
 
                 drained_total += drained_pass;
@@ -664,29 +699,21 @@ namespace un::log {
         }
 
         static void flush_runtime_sinks(runtime_state& runtime) {
-            auto sinks = std::vector<backend::sink_ptr>{};
-            {
-                std::lock_guard lock{runtime.runtime_mutex};
-                sinks = runtime.configured_sinks |
-                        std::views::transform([](const auto& sink) { return sink.entry.sink; }) |
-                        std::ranges::to<std::vector>();
-                std::ranges::copy(
-                        runtime.custom_sinks | std::views::transform([](const auto& sink) { return sink.sink; }),
-                        std::back_inserter(sinks));
-            }
-
-            for (auto& sink : sinks) {
-                sink->flush();
+            auto sinks = sink_snapshot(runtime);
+            for (const auto& sink : *sinks) {
+                sink.sink->flush();
             }
         }
 
         static void consumer_main(runtime_state& runtime) {
+            auto scratch = consumer_scratch{};
+
             for (;;) {
-                drain_runtime_queues(runtime);
+                drain_runtime_queues(runtime, scratch);
 
                 auto requested = runtime.flush_requested.load(std::memory_order_acquire);
                 if (requested != runtime.flush_completed.load(std::memory_order_acquire)) {
-                    drain_runtime_queues(runtime);
+                    drain_runtime_queues(runtime, scratch);
                     flush_runtime_sinks(runtime);
                     runtime.flush_completed.store(requested, std::memory_order_release);
                     runtime.consumer_cv.notify_all();
@@ -706,7 +733,7 @@ namespace un::log {
                 });
             }
 
-            drain_runtime_queues(runtime);
+            drain_runtime_queues(runtime, scratch);
             flush_runtime_sinks(runtime);
         }
 
@@ -873,6 +900,7 @@ namespace un::log {
                             .sink = std::move(sink),
                             .pattern = std::string{format},
                     });
+            rebuild_consumer_sinks_locked(st);
         }
 
         void flush_backend() {
