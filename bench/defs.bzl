@@ -40,9 +40,21 @@ set -euo pipefail
 
 {runfiles}
 
-WORKSPACE_ROOT="${{BUILD_WORKSPACE_DIRECTORY:-$PWD}}"
-OUT_ROOT="${{UNLOG_BENCH_OUTPUT_DIR:-$WORKSPACE_ROOT/bench-results/$(date +%Y%m%d-%H%M%S)}}"
-mkdir -p "$OUT_ROOT"
+has_benchmark_out=false
+has_bench_output_dir=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --benchmark_out|--benchmark_out=*)
+            has_benchmark_out=true
+            ;;
+        --bench_output_dir|--bench_output_dir=*)
+            has_bench_output_dir=true
+            ;;
+    esac
+done
+
+benchmark_args=()
 
 current_sink_out=""
 
@@ -54,14 +66,21 @@ cleanup() {{
 
 trap cleanup EXIT
 
-result_path="$OUT_ROOT/{name}.json"
-current_sink_out="$(mktemp -d "${{TMPDIR:-/tmp}}/unlog-bench-{name}.XXXXXX")"
+if ! $has_benchmark_out; then
+    WORKSPACE_ROOT="${{BUILD_WORKSPACE_DIRECTORY:-$PWD}}"
+    OUT_ROOT="${{UNLOG_BENCH_OUTPUT_DIR:-$WORKSPACE_ROOT/bench-results/$(date +%Y%m%d-%H%M%S)}}"
+    mkdir -p "$OUT_ROOT"
+    benchmark_args+=("--benchmark_out=$OUT_ROOT/{name}.json" "--benchmark_out_format=json")
+fi
+
+if ! $has_bench_output_dir; then
+    current_sink_out="$(mktemp -d "${{TMPDIR:-/tmp}}/unlog-bench-{name}.XXXXXX")"
+    benchmark_args+=("--bench_output_dir=$current_sink_out")
+fi
 
 "$(rlocation "{workspace}/{relpath}")" \
     --bench_sink={sink} \
-    --bench_output_dir="$current_sink_out" \
-    --benchmark_out="$result_path" \
-    --benchmark_out_format=json \
+    "${{benchmark_args[@]}}" \
     "$@"
 
 rm -rf "$current_sink_out"

@@ -59,7 +59,8 @@ namespace {
             switch (options.sink) {
                 case unlog_bench::sink_kind::file:
                     std::filesystem::create_directories(unlog_bench::ensure_output_dir());
-                    return spdlog::basic_logger_mt<spdlog::async_factory_impl<spdlog::async_overflow_policy::discard_new>>(
+                    return spdlog::basic_logger_mt<
+                            spdlog::async_factory_impl<spdlog::async_overflow_policy::discard_new>>(
                             "root", unlog_bench::file_sink_path(name()).string(), true);
                 case unlog_bench::sink_kind::stdout:
                     return std::make_shared<spdlog::async_logger>(
@@ -68,7 +69,8 @@ namespace {
                             thread_pool,
                             spdlog::async_overflow_policy::discard_new);
                 case unlog_bench::sink_kind::fd:
-                    return spdlog::basic_logger_mt<spdlog::async_factory_impl<spdlog::async_overflow_policy::discard_new>>(
+                    return spdlog::basic_logger_mt<
+                            spdlog::async_factory_impl<spdlog::async_overflow_policy::discard_new>>(
                             "root", unlog_bench::null_sink_path().string(), true);
             }
 

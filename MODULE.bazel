@@ -39,7 +39,7 @@ pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     hub_name = "pypi",
     python_version = "3.13",
-    requirements_lock = "//bench/plot:requirements.txt",
+    requirements_lock = "//bench/plot:requirements_lock.txt",
 )
 use_repo(pip, "pypi")
 

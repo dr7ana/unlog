@@ -20,64 +20,64 @@ cc_library(
 provider_benchmark(
     name = "unlog_file",
     src = "src/unlog.cpp",
-    deps = ["//:libunlog"],
     sink = "file",
+    deps = ["//:libunlog"],
 )
 
 provider_benchmark(
     name = "unlog_stdout",
     src = "src/unlog.cpp",
-    deps = ["//:libunlog"],
     sink = "stdout",
+    deps = ["//:libunlog"],
 )
 
 provider_benchmark(
     name = "unlog_fd",
     src = "src/unlog.cpp",
-    deps = ["//:libunlog"],
     sink = "fd",
+    deps = ["//:libunlog"],
 )
 
 provider_benchmark(
     name = "spdlog_file",
     src = "src/spdlog.cpp",
-    deps = ["@spdlog"],
     sink = "file",
+    deps = ["@spdlog"],
 )
 
 provider_benchmark(
     name = "spdlog_stdout",
     src = "src/spdlog.cpp",
-    deps = ["@spdlog"],
     sink = "stdout",
+    deps = ["@spdlog"],
 )
 
 provider_benchmark(
     name = "quill_file",
     src = "src/quill.cpp",
-    deps = ["@quill"],
     sink = "file",
+    deps = ["@quill"],
 )
 
 provider_benchmark(
     name = "quill_stdout",
     src = "src/quill.cpp",
-    deps = ["@quill"],
     sink = "stdout",
+    deps = ["@quill"],
 )
 
 provider_benchmark(
     name = "fmtlog_file",
     src = "src/fmtlog.cpp",
-    deps = ["@fmtlog"],
     sink = "file",
+    deps = ["@fmtlog"],
 )
 
 provider_benchmark(
     name = "fmtlog_stdout",
     src = "src/fmtlog.cpp",
-    deps = ["@fmtlog"],
     sink = "stdout",
+    deps = ["@fmtlog"],
 )
 
 benchmark_suite(

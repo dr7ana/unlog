@@ -12,6 +12,13 @@ from plotly.subplots import make_subplots
 
 THREAD_COUNTS = [1, 2, 4, 8, 16]
 AGGREGATES = {"mean", "median", "stddev", "cv"}
+PROVIDER_ORDER = ["unlog", "spdlog", "quill", "fmtlog"]
+PROVIDER_COLORS = {
+    "unlog": "#1f77b4",
+    "spdlog": "#ff7f0e",
+    "quill": "#2ca02c",
+    "fmtlog": "#d62728",
+}
 REPEATED_PATTERN = re.compile(
     r"^(?P<name>[^/]+)/repeated/iterations:(?P<iterations>\d+)/repeats:(?P<repeats>\d+)/threads:(?P<threads>\d+?)(?:_(?P<aggregate>mean|median|stddev|cv))?$"
 )
@@ -109,9 +116,8 @@ def sinks(rows: list[ResultRow]) -> list[str]:
 
 
 def providers(rows: list[ResultRow], sink: str) -> list[str]:
-    order = ["unlog", "spdlog", "quill", "fmtlog"]
     present = {row.provider for row in rows if row.sink == sink}
-    return [provider for provider in order if provider in present]
+    return [provider for provider in PROVIDER_ORDER if provider in present]
 
 
 def select_aggregate(
@@ -144,16 +150,21 @@ def render(rows: list[ResultRow], run_dir: Path) -> None:
     fig = make_subplots(
         rows=len(sink_list),
         cols=3,
-        subplot_titles=[f"{sink} repeated mean cpu" for sink in sink_list]
-        + [f"{sink} repeated median cpu" for sink in sink_list]
-        + [f"{sink} min_time cpu" for sink in sink_list],
+        column_titles=[
+            "<b>Repeated Mean CPU</b>",
+            "<b>Repeated Median CPU</b>",
+            "<b>Min Time CPU</b>",
+        ],
     )
+    legend_seen: set[str] = set()
 
     for row_index, sink in enumerate(sink_list, start=1):
         for provider in providers(rows, sink):
             mean_points = select_aggregate(rows, sink, provider, "mean")
             median_points = select_aggregate(rows, sink, provider, "median")
             min_time_points = select_min_time(rows, sink, provider)
+            color = PROVIDER_COLORS[provider]
+            show_legend = provider not in legend_seen
 
             if mean_points:
                 fig.add_trace(
@@ -161,12 +172,16 @@ def render(rows: list[ResultRow], run_dir: Path) -> None:
                         x=[threads for threads, _ in mean_points],
                         y=[value for _, value in mean_points],
                         mode="lines+markers",
-                        name=f"{provider}_{sink}",
-                        legendgroup=f"{provider}_{sink}",
+                        name=provider,
+                        legendgroup=provider,
+                        showlegend=show_legend,
+                        line={"color": color},
+                        marker={"color": color},
                     ),
                     row=row_index,
                     col=1,
                 )
+                legend_seen.add(provider)
 
             if median_points:
                 fig.add_trace(
@@ -174,9 +189,11 @@ def render(rows: list[ResultRow], run_dir: Path) -> None:
                         x=[threads for threads, _ in median_points],
                         y=[value for _, value in median_points],
                         mode="lines+markers",
-                        name=f"{provider}_{sink}",
-                        legendgroup=f"{provider}_{sink}",
+                        name=provider,
+                        legendgroup=provider,
                         showlegend=False,
+                        line={"color": color},
+                        marker={"color": color},
                     ),
                     row=row_index,
                     col=2,
@@ -188,9 +205,11 @@ def render(rows: list[ResultRow], run_dir: Path) -> None:
                         x=[threads for threads, _ in min_time_points],
                         y=[value for _, value in min_time_points],
                         mode="lines+markers",
-                        name=f"{provider}_{sink}",
-                        legendgroup=f"{provider}_{sink}",
+                        name=provider,
+                        legendgroup=provider,
                         showlegend=False,
+                        line={"color": color},
+                        marker={"color": color},
                     ),
                     row=row_index,
                     col=3,
@@ -212,14 +231,40 @@ def render(rows: list[ResultRow], run_dir: Path) -> None:
             )
 
     fig.update_layout(
-        title=f"Benchmark Results: {run_dir.name}",
-        template="plotly_white",
+        title=f"<b>Benchmark Results:</b> {run_dir.name}<br><br><br>",
+        template="plotly_dark",
         height=420 * max(1, len(sink_list)),
-        width=1500,
+        autosize=True,
+        margin={"l": 175, "r": 40, "t": 145, "b": 40},
     )
 
+    for annotation in fig.layout.annotations[:3]:
+        annotation.y += 0.03
+
+    for row_index, sink in enumerate(sink_list, start=1):
+        axis_index = (row_index - 1) * 3 + 1
+        yaxis_name = "yaxis" if axis_index == 1 else f"yaxis{axis_index}"
+        domain = fig.layout[yaxis_name].domain
+        fig.add_annotation(
+            x=-0.08,
+            y=(domain[0] + domain[1]) / 2,
+            xref="paper",
+            yref="paper",
+            text=f"<b>{sink}</b>",
+            textangle=0,
+            showarrow=False,
+            font={"size": 15},
+            xanchor="center",
+            yanchor="middle",
+        )
+
     report_path = run_dir / "report.html"
-    fig.write_html(report_path, include_plotlyjs=True, full_html=True)
+    fig.write_html(
+        report_path,
+        include_plotlyjs=True,
+        full_html=True,
+        config={"responsive": True},
+    )
     print(report_path)
 
 

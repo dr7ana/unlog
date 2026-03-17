@@ -70,7 +70,8 @@ namespace {
                 case unlog_bench::sink_kind::file:
                     std::filesystem::create_directories(unlog_bench::ensure_output_dir());
                     return frontend::create_or_get_sink<quill::FileSink>(unlog_bench::file_sink_path(name()).string());
-                case unlog_bench::sink_kind::stdout: {
+                case unlog_bench::sink_kind::stdout:
+                {
                     quill::ConsoleSinkConfig sink_config;
                     sink_config.set_colour_mode(quill::ConsoleSinkConfig::ColourMode::Never);
                     sink_config.set_stream("stdout");
