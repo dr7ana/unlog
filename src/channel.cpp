@@ -20,6 +20,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 
@@ -568,7 +569,7 @@ namespace un::log {
                     .logger_name = {},
                     .level = slot.level(),
                     .source_location = slot.source_location(),
-                    .message = std::string{slot.message()},
+                    .message = slot.message(),
                     .timestamp = slot.header.timestamp,
             };
 
@@ -619,13 +620,12 @@ namespace un::log {
                 auto line = backend::format_cache_line(
                         line_cache,
                         sink.pattern,
-                        false,
+                        true,
                         rec,
                         time_context.tm,
                         time_context.millis,
                         time_context.elapsed);
                 sink.sink->write(line);
-                sink.sink->write("\n"sv);
             }
         }
 
@@ -754,7 +754,7 @@ namespace un::log {
             ensure_global_config_locked(st);
             ensure_consumer_started_locked(st);
             if (st.global.mode == RuntimeMode::threadsafe) {
-                [[maybe_unused]] auto& producer = ensure_threadsafe_runtime_queue_producer(st);
+                std::ignore = ensure_threadsafe_runtime_queue_producer(st);
             }
         }
 
@@ -833,7 +833,7 @@ namespace un::log {
             auto max_message_size =
                     detail::resolve_channel_max_message_size(static_cast<size_t>(decltype(conf)::max_record_size));
 
-            [[maybe_unused]] auto route = make_channel_route_locked(
+            std::ignore = make_channel_route_locked(
                     st,
                     channel_registration{
                             .name = conf.name,
@@ -1013,6 +1013,16 @@ namespace un::log {
         void reset_runtime_for_test() {
             detail::destroy_runtime(detail::runtime_lifecycle::uninitialized);
         }
+
+        size_t threadsafe_producer_count() {
+            auto* st = detail::try_access_state();
+            if (!st || st->global.mode != RuntimeMode::threadsafe) {
+                return 0;
+            }
+
+            std::lock_guard lock{st->producer_registry.mutex};
+            return st->producer_registry.producers.size();
+        }
     }  // namespace test
 
     channel global_channel() {
@@ -1055,6 +1065,25 @@ namespace un::log {
         }
 
         return {};
+    }
+
+    void prewarm_thread() {
+        if (detail::runtime_is_shutting_down()) {
+            return;
+        }
+
+        auto& control = detail::access_control();
+        std::lock_guard lock{control.mutex};
+        auto* st = control.state.load(std::memory_order_acquire);
+        if (!st) {
+            return;
+        }
+
+        if (st->global.mode != RuntimeMode::threadsafe) {
+            return;
+        }
+
+        std::ignore = detail::ensure_threadsafe_runtime_queue_producer(*st);
     }
 
     void flush() {

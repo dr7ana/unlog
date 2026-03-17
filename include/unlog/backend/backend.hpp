@@ -23,10 +23,10 @@ namespace un::log::backend {
     };
 
     struct log_entry {
-        std::string logger_name;
+        std::string_view logger_name;
         log_level level{log_level::info};
         detail::source_loc source_location{};
-        std::string message;
+        std::string_view message;
         uint64_t timestamp{0};
     };
 

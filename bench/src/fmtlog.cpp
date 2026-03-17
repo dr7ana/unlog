@@ -1,5 +1,5 @@
 #define FMTLOG_BLOCK 0
-#define FMTLOG_QUEUE_SIZE 4194304
+#define FMTLOG_QUEUE_SIZE UNLOG_BENCH_THREAD_BUFSIZE_BYTES
 #include "provider.hpp"
 
 #include <fmtlog.h>

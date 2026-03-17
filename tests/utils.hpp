@@ -19,6 +19,7 @@ namespace un::log::test {
     void get_runtime_backend(const std::function<void()>& fn);
     bool consumer_thread_started();
     void reset_runtime_for_test();
+    size_t threadsafe_producer_count();
 
     struct test_helper {
         template <typename... Opt>
@@ -43,6 +44,8 @@ namespace un::log::test {
         }
 
         static void reset_runtime_state() { reset_runtime_for_test(); }
+
+        static size_t producer_count() { return threadsafe_producer_count(); }
     };
 
     struct runtime_state_guard {

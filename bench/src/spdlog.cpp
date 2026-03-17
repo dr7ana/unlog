@@ -11,12 +11,22 @@
 
 namespace {
 
+    static constexpr std::size_t spdlog_thread_pool_queue_size() noexcept {
+        constexpr std::size_t slot_size = sizeof(spdlog::details::async_msg);
+        const std::size_t slots = unlog_bench::thread_bufsize_bytes / slot_size;
+        if (slots == 0) {
+            return 1;
+        }
+
+        return slots;
+    }
+
     struct spdlog_provider {
         static constexpr std::string_view name() noexcept { return "spdlog"; }
 
         static void initialize(const unlog_bench::benchmark_options& options) {
             std::call_once(init_flag(), [&options]() {
-                spdlog::init_thread_pool(8 * 1024, 1);
+                spdlog::init_thread_pool(spdlog_thread_pool_queue_size(), 1);
                 auto logger = make_logger(options);
                 logger->set_level(spdlog::level::info);
                 logger->set_pattern("%v");

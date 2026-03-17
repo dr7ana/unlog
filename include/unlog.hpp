@@ -193,6 +193,8 @@ namespace un::log {
 
     global_config get_global_config();
 
+    void prewarm_thread();
+
     inline void set_default_level(log_level level = log_level::info) {
         return detail::set_default_level(level);
     }

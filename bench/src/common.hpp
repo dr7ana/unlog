@@ -10,7 +10,13 @@
 #include <string_view>
 #include <vector>
 
+#ifndef UNLOG_BENCH_THREAD_BUFSIZE_BYTES
+#define UNLOG_BENCH_THREAD_BUFSIZE_BYTES (1u << 22)
+#endif
+
 namespace unlog_bench {
+
+    inline constexpr std::size_t thread_bufsize_bytes{UNLOG_BENCH_THREAD_BUFSIZE_BYTES};
 
     enum class sink_kind {
         file,
@@ -30,7 +36,6 @@ namespace unlog_bench {
         sink_kind sink{sink_kind::file};
         std::filesystem::path output_dir{"bench-results"};
         std::size_t dataset_size{8192};
-        std::size_t thread_bufsize{1u << 22};
     };
 
     inline constexpr std::array<int, 5> thread_counts{

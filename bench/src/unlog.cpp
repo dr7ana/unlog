@@ -17,7 +17,7 @@ namespace {
             std::call_once(init_flag(), [&options]() {
                 unlog::set_global_config({
                         .mode = unlog::RuntimeMode::threadsafe,
-                        .thread_bufsize = options.thread_bufsize,
+                        .thread_bufsize = unlog_bench::thread_bufsize_bytes,
                 });
 
                 auto config = make_config(options);
@@ -29,9 +29,7 @@ namespace {
             });
         }
 
-        static void prepare_thread() {
-            [[maybe_unused]] auto& producer = unlog::detail::get_runtime_queue_producer(unlog::RuntimeMode::threadsafe);
-        }
+        static void prepare_thread() { unlog::prewarm_thread(); }
 
         static void log(const unlog_bench::log_message& message) {
             unlog::info(

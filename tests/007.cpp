@@ -1,7 +1,9 @@
 #include "utils.hpp"
 
+#include <future>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace un::log::test {
 
@@ -97,10 +99,76 @@ namespace un::log::test {
         auto cfg = config<>::make("global-config-threadsafe");
         make_channel(cfg, true);
 
+        CHECK_NOTHROW(prewarm_thread());
         auto& producer = detail::get_runtime_queue_producer(RuntimeMode::threadsafe);
         CHECK(get_global_config().mode == RuntimeMode::threadsafe);
         CHECK(get_global_config().thread_bufsize == thread_bufsize);
         CHECK(producer.queue().capacity() == *expected_capacity);
+    }
+
+    TEST_CASE("007 - prewarm_thread is a no-op without runtime", "[007][runtime][startup]") {
+        runtime_state_guard guard;
+
+        CHECK_NOTHROW(prewarm_thread());
+        CHECK(runtime_ready() == false);
+    }
+
+    TEST_CASE("007 - prewarm_thread can register a worker producer before first log", "[007][runtime][prewarm]") {
+        runtime_state_guard guard;
+
+        constexpr auto thread_bufsize = size_t{1} << 22;
+        set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = thread_bufsize});
+        auto route = make_channel("prewarm-worker", true);
+        util::capture_test_logs(log_level::info);
+
+        REQUIRE(test_helper::producer_count() == 1u);
+
+        SECTION("vanilla") {
+            std::promise<void> ready_promise;
+            auto ready = ready_promise.get_future();
+            std::promise<void> go_promise;
+            auto go = go_promise.get_future().share();
+
+            auto worker = std::jthread([&](std::stop_token) {
+                ready_promise.set_value();
+                go.wait();
+                unlog::info(route, "vanilla-worker-message");
+            });
+
+            ready.wait();
+            CHECK(test_helper::producer_count() == 1u);
+
+            go_promise.set_value();
+            worker.join();
+
+            unlog::flush();
+            CHECK(test_helper::producer_count() == 2u);
+            REQUIRE_CONTAINS{"vanilla-worker-message"};
+        }
+
+        SECTION("prewarm") {
+            std::promise<void> ready_promise;
+            auto ready = ready_promise.get_future();
+            std::promise<void> go_promise;
+            auto go = go_promise.get_future().share();
+
+            auto worker = std::jthread([&](std::stop_token) {
+                unlog::prewarm_thread();
+                ready_promise.set_value();
+                go.wait();
+                unlog::info(route, "prewarm-worker-message");
+            });
+
+            ready.wait();
+            CHECK(test_helper::producer_count() == 2u);
+
+            go_promise.set_value();
+            worker.join();
+
+            unlog::flush();
+            CHECK(test_helper::producer_count() == 2u);
+            REQUIRE_CONTAINS{"prewarm-worker-message"};
+        }
     }
 
     TEST_CASE("007 - global config rejects invalid thread buffer size", "[007][runtime][global-config]") {

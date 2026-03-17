@@ -14,9 +14,9 @@ namespace {
 
     struct frontend_options {
         static constexpr quill::QueueType queue_type = quill::QueueType::BoundedDropping;
-        static constexpr std::size_t initial_queue_capacity = 4ull * 1024ull * 1024ull;
+        static constexpr std::size_t initial_queue_capacity = unlog_bench::thread_bufsize_bytes;
         static constexpr std::uint32_t blocking_queue_retry_interval_ns = 800;
-        static constexpr std::size_t unbounded_queue_max_capacity = 2ull * 1024ull * 1024ull * 1024ull;
+        static constexpr std::size_t unbounded_queue_max_capacity = unlog_bench::thread_bufsize_bytes;
         static constexpr quill::HugePagesPolicy huge_pages_policy = quill::HugePagesPolicy::Never;
     };
 

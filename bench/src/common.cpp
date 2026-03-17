@@ -111,12 +111,6 @@ namespace unlog_bench {
                 continue;
             }
 
-            if (starts_with(arg, "--bench_thread_bufsize=")) {
-                g_options.thread_bufsize =
-                        parse_size(arg.substr(sizeof("--bench_thread_bufsize=") - 1), "thread buffer size");
-                continue;
-            }
-
             argv[write_index] = argv[read_index];
             ++write_index;
         }
