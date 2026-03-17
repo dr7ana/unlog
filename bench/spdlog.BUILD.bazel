@@ -1,0 +1,24 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "spdlog",
+    srcs = glob(
+        ["src/*.cpp"],
+        allow_empty = True,
+    ),
+    hdrs = glob(
+        [
+            "include/**/*.h",
+            "include/**/*.hpp",
+        ],
+        allow_empty = True,
+    ),
+    includes = ["include"],
+    linkstatic = True,
+    defines = [
+        "SPDLOG_COMPILED_LIB",
+    ],
+    linkopts = ["-pthread"],
+)

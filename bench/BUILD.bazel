@@ -1,0 +1,97 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//bench:defs.bzl", "benchmark_suite", "provider_benchmark")
+
+cc_library(
+    name = "common",
+    srcs = ["src/common.cpp"],
+    hdrs = [
+        "src/common.hpp",
+        "src/provider.hpp",
+    ],
+    includes = ["src"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "@benchmark",
+        "@fmt",
+    ],
+)
+
+provider_benchmark(
+    name = "unlog_file",
+    src = "src/unlog.cpp",
+    deps = ["//:libunlog"],
+    sink = "file",
+)
+
+provider_benchmark(
+    name = "unlog_stdout",
+    src = "src/unlog.cpp",
+    deps = ["//:libunlog"],
+    sink = "stdout",
+)
+
+provider_benchmark(
+    name = "unlog_fd",
+    src = "src/unlog.cpp",
+    deps = ["//:libunlog"],
+    sink = "fd",
+)
+
+provider_benchmark(
+    name = "spdlog_file",
+    src = "src/spdlog.cpp",
+    deps = ["@spdlog"],
+    sink = "file",
+)
+
+provider_benchmark(
+    name = "spdlog_stdout",
+    src = "src/spdlog.cpp",
+    deps = ["@spdlog"],
+    sink = "stdout",
+)
+
+provider_benchmark(
+    name = "quill_file",
+    src = "src/quill.cpp",
+    deps = ["@quill"],
+    sink = "file",
+)
+
+provider_benchmark(
+    name = "quill_stdout",
+    src = "src/quill.cpp",
+    deps = ["@quill"],
+    sink = "stdout",
+)
+
+provider_benchmark(
+    name = "fmtlog_file",
+    src = "src/fmtlog.cpp",
+    deps = ["@fmtlog"],
+    sink = "file",
+)
+
+provider_benchmark(
+    name = "fmtlog_stdout",
+    src = "src/fmtlog.cpp",
+    deps = ["@fmtlog"],
+    sink = "stdout",
+)
+
+benchmark_suite(
+    name = "bench_all",
+    benchmarks = [
+        ":unlog_file",
+        ":spdlog_file",
+        ":quill_file",
+        ":fmtlog_file",
+        ":unlog_stdout",
+        ":spdlog_stdout",
+        ":quill_stdout",
+        ":fmtlog_stdout",
+        ":unlog_fd",
+    ],
+    cooloff_ms = 5000,
+)

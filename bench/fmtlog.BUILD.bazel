@@ -1,0 +1,24 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "fmtlog",
+    srcs = ["fmtlog.cc"],
+    hdrs = glob(
+        [
+            "*.h",
+            "*.hpp",
+            "fmt/include/**/*.h",
+            "fmt/include/**/*.hpp",
+        ],
+        allow_empty = True,
+    ),
+    includes = [
+        ".",
+        "fmt/include",
+    ],
+    linkopts = ["-pthread"],
+    linkstatic = True,
+    deps = ["@fmt"],
+)

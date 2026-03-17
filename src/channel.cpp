@@ -477,6 +477,7 @@ namespace un::log {
             return ensure_threadsafe_runtime_queue_producer(st);
         }
 
+#if UNLOG_DIAGNOSTIC
         static std::vector<runtime_queue_producer*> runtime_queue_producer_snapshot() {
             auto* st = try_access_state();
             if (!st) {
@@ -496,6 +497,7 @@ namespace un::log {
                    std::views::transform([](const auto& producer) { return producer.get(); }) |
                    std::ranges::to<std::vector>();
         }
+#endif
 
         static std::vector<runtime_queue_producer*> active_runtime_queue_producer_snapshot(runtime_state& runtime) {
             std::lock_guard lock{runtime.producer_registry.mutex};
