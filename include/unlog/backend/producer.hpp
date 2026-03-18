@@ -9,13 +9,14 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 
 namespace un::log::backend {
 
-    struct producer_active_word {
-        alignas(64) std::atomic<uint64_t> bits{0};
+    struct alignas(64) producer_active_word {
+        std::atomic<uint64_t> bits{0};
     };
 
     inline constexpr std::optional<size_t> queue_slot_capacity_for(
@@ -62,28 +63,31 @@ namespace un::log::backend {
         [[nodiscard]] const queue_type& queue() const noexcept { return *queue_; }
 
         [[nodiscard]] uint64_t next_sequence() noexcept { return sequence_++; }
-        [[nodiscard]] producer_active_word* active_word() const noexcept { return active_word_; }
-        [[nodiscard]] size_t active_index() const noexcept { return active_index_; }
+        [[nodiscard]] size_t producer_index() const noexcept { return producer_index_; }
         [[nodiscard]] size_t active_word_index() const noexcept { return active_word_index_; }
         [[nodiscard]] uint64_t active_bit_mask() const noexcept { return active_bit_mask_; }
 
-        void bind_active_word(producer_active_word* active_word, size_t active_index) noexcept {
-            active_word_ = active_word;
-            active_index_ = active_index;
-            active_word_index_ = active_index / 64u;
-            active_bit_mask_ = uint64_t{1} << (active_index % 64u);
+        void bind_active_word(producer_active_word& active_word, size_t producer_index) noexcept {
+            active_word_ = std::ref(active_word);
+            producer_index_ = producer_index;
+            active_word_index_ = producer_index / 64u;
+            active_bit_mask_ = uint64_t{1} << (producer_index % 64u);
         }
 
-        [[nodiscard]] bool try_mark_active_published() noexcept {
+        [[nodiscard]] bool try_mark_enqueued() noexcept {
             auto expected = false;
-            return active_published_.compare_exchange_strong(
+            return enqueued_.compare_exchange_strong(
                     expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
         }
 
-        void clear_active_published() noexcept { active_published_.store(false, std::memory_order_release); }
+        void clear_enqueued() noexcept { enqueued_.store(false, std::memory_order_release); }
 
-        [[nodiscard]] bool active_published() const noexcept {
-            return active_published_.load(std::memory_order_acquire);
+        [[nodiscard]] bool enqueued() const noexcept { return enqueued_.load(std::memory_order_acquire); }
+
+        void publish_ready_bit() noexcept {
+            if (active_word_) {
+                active_word_->get().bits.fetch_or(active_bit_mask_, std::memory_order_release);
+            }
         }
 
 #if UNLOG_DIAGNOSTIC
@@ -113,7 +117,7 @@ namespace un::log::backend {
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
 #endif
-            active_published_.store(false, std::memory_order_relaxed);
+            enqueued_.store(false, std::memory_order_relaxed);
         }
 
         void reset_for_test() noexcept {
@@ -127,18 +131,18 @@ namespace un::log::backend {
             dropped_.store(0, std::memory_order_relaxed);
             truncated_.store(0, std::memory_order_relaxed);
 #endif
-            active_published_.store(false, std::memory_order_relaxed);
+            enqueued_.store(false, std::memory_order_relaxed);
         }
 
       private:
         uint64_t thread_id_{0};
         uint64_t sequence_{0};
-        producer_active_word* active_word_{nullptr};
-        size_t active_index_{0};
+        std::optional<std::reference_wrapper<producer_active_word>> active_word_{};
+        size_t producer_index_{0};
         size_t active_word_index_{0};
         uint64_t active_bit_mask_{0};
         std::optional<queue_type> queue_{};
-        std::atomic<bool> active_published_{false};
+        std::atomic<bool> enqueued_{false};
 #if UNLOG_DIAGNOSTIC
         std::atomic<uint64_t> emitted_{0};
         std::atomic<uint64_t> dropped_{0};

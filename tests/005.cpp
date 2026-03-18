@@ -64,7 +64,7 @@ namespace un::log::test {
         make_channel(cfg, true);
 
         std::stringstream stream;
-        detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(stream));
+        detail::add_sink(cfg, std::make_shared<backend::ostream_sink_sc>(stream));
 
         unlog::info("runtime-default-message");
         unlog::flush();

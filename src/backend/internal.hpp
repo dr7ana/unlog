@@ -12,7 +12,7 @@ namespace un::log::backend {
         return std::chrono::nanoseconds{static_cast<std::chrono::nanoseconds::rep>(clamped)};
     }
 
-    static constexpr std::tm local_time(const std::chrono::system_clock::time_point& now) {
+    constexpr std::tm local_time(const std::chrono::system_clock::time_point& now) {
         auto tt = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
         localtime_r(&tt, &tm);

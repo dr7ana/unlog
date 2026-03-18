@@ -37,7 +37,7 @@ namespace un::log::test {
 
         auto cfg = config<>::make("sink-runtime");
         std::stringstream stream;
-        detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(stream));
+        detail::add_sink(cfg, std::make_shared<backend::ostream_sink_sc>(stream));
 
         CHECK(runtime_ready() == true);
         CHECK(stream.str().empty());
@@ -220,7 +220,7 @@ namespace un::log::test {
         CHECK_NOTHROW(make_channel(second_cfg, false));
 
         std::stringstream stream;
-        CHECK_NOTHROW(detail::add_sink(first_cfg, std::make_shared<backend::ostream_sink>(stream)));
+        CHECK_NOTHROW(detail::add_sink(first_cfg, std::make_shared<backend::ostream_sink_sc>(stream)));
     }
 
 #if UNLOG_DIAGNOSTIC
@@ -242,7 +242,7 @@ namespace un::log::test {
         CHECK_NOTHROW(make_channel(pre_activate_cfg, false));
 
         std::stringstream pre_activate_stream;
-        CHECK_NOTHROW(detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(pre_activate_stream)));
+        CHECK_NOTHROW(detail::add_sink(cfg, std::make_shared<backend::ostream_sink_sc>(pre_activate_stream)));
 
         unlog::info("activate-runtime");
         auto after_emit = detail::backend_stats();
@@ -253,7 +253,7 @@ namespace un::log::test {
 
         std::stringstream late_stream;
         CHECK_THROWS_AS(
-                detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(late_stream)), std::invalid_argument);
+                detail::add_sink(cfg, std::make_shared<backend::ostream_sink_sc>(late_stream)), std::invalid_argument);
     }
 #endif
 
@@ -269,7 +269,8 @@ namespace un::log::test {
         CHECK_THROWS_AS(make_channel(next_cfg, false), std::invalid_argument);
 
         std::stringstream stream;
-        CHECK_THROWS_AS(detail::add_sink(cfg, std::make_shared<backend::ostream_sink>(stream)), std::invalid_argument);
+        CHECK_THROWS_AS(
+                detail::add_sink(cfg, std::make_shared<backend::ostream_sink_sc>(stream)), std::invalid_argument);
     }
 
     TEST_CASE("007 - global config is locked after channel setup", "[007][runtime][global-config]") {

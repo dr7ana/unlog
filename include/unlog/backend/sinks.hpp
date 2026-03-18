@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <fstream>
 #include <ostream>
 #include <stdexcept>
@@ -19,21 +20,28 @@
 
 namespace un::log::backend {
 
-    class ostream_sink : public sink {
+    enum class sink_mode : uint8_t { single_consumer, multi_consumer };
+
+    template <sink_mode Mode = sink_mode::single_consumer>
+    class ostream_sink final : public sink {
+        static constexpr bool threadsafe{Mode == sink_mode::multi_consumer};
+
       public:
         explicit ostream_sink(std::ostream& out, bool color = false) : out_{&out}, color_{color} {}
 
         void write(std::string_view line) override {
-            std::lock_guard lock{mutex_};
+            if constexpr (threadsafe) {
+                std::lock_guard lock{mutex_};
+            }
             (*out_) << line;
         }
 
         void flush() override {
-            std::lock_guard lock{mutex_};
+            if constexpr (threadsafe) {
+                std::lock_guard lock{mutex_};
+            }
             out_->flush();
         }
-
-        bool supports_color() const override { return color_; }
 
       private:
         std::ostream* out_;
@@ -41,7 +49,13 @@ namespace un::log::backend {
         mutable std::mutex mutex_;
     };
 
-    class file_sink : public sink {
+    using ostream_sink_sc = ostream_sink<sink_mode::single_consumer>;
+    using ostream_sink_mc = ostream_sink<sink_mode::multi_consumer>;
+
+    template <sink_mode Mode = sink_mode::single_consumer>
+    class file_sink final : public sink {
+        static constexpr bool threadsafe{Mode == sink_mode::multi_consumer};
+
       public:
         explicit file_sink(std::string_view path) : file_{std::string{path}, std::ios::out | std::ios::app} {
             if (!file_.is_open()) {
@@ -51,12 +65,16 @@ namespace un::log::backend {
         }
 
         void write(std::string_view line) override {
-            std::lock_guard lock{mutex_};
+            if constexpr (threadsafe) {
+                std::lock_guard lock{mutex_};
+            }
             file_ << line;
         }
 
         void flush() override {
-            std::lock_guard lock{mutex_};
+            if constexpr (threadsafe) {
+                std::lock_guard lock{mutex_};
+            }
             file_.flush();
         }
 
@@ -65,7 +83,10 @@ namespace un::log::backend {
         mutable std::mutex mutex_;
     };
 
-    class fd_sink : public sink {
+    using file_sink_sc = file_sink<sink_mode::single_consumer>;
+    using file_sink_mc = file_sink<sink_mode::multi_consumer>;
+
+    class fd_sink final : public sink {
       public:
         explicit fd_sink(int fd) : fd_{fd} {
             if (fd_ < 0)
@@ -91,7 +112,7 @@ namespace un::log::backend {
         int fd_;
     };
 
-    class unix_dgram_sink : public sink {
+    class unix_dgram_sink final : public sink {
       public:
         explicit unix_dgram_sink(std::string_view path) : sock_{::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0)} {
             if (sock_ < 0)

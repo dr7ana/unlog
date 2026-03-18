@@ -35,7 +35,6 @@ namespace un::log::backend {
         virtual ~sink() = default;
         virtual void write(std::string_view line) = 0;
         virtual void flush() = 0;
-        virtual bool supports_color() const { return false; }
     };
 
     using sink_ptr = std::shared_ptr<sink>;
