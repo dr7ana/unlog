@@ -8,6 +8,7 @@ target_link_libraries(
     PUBLIC
     unlog
     unlog_warnings
+    Catch2::Catch2WithMain
 )
     
 
@@ -24,4 +25,4 @@ add_executable(
     009.cpp
 )
 
-target_link_libraries(alltests PRIVATE tests_common Catch2::Catch2WithMain)
+target_link_libraries(alltests PRIVATE tests_common)
