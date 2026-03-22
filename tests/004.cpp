@@ -55,14 +55,14 @@ namespace un::log::test {
 
         auto cfg = config<options::truncate>::make("counter-truncate-oversize");
 
-        make_channel(cfg, true);
+        auto route = make_channel(cfg, false);
         util::capture_test_logs(cfg);
 
         auto before = un::log::detail::backend_stats();
         auto msg = std::string{"oversize-truncate-"} + std::string(8192u, 'x');
         REQUIRE(msg.size() == 8210u);
 
-        unlog::info("{}", msg);
+        unlog::info(route, "{}", msg);
 
         auto after = un::log::detail::backend_stats();
         CHECK(after.emitted == (before.emitted + 1u));
@@ -77,7 +77,7 @@ namespace un::log::test {
 
         auto cfg = config<options::truncate, options::max_record_size<256>>::make("small-truncate-limit");
 
-        make_channel(cfg, true);
+        auto route = make_channel(cfg, false);
         util::capture_test_logs(cfg);
 
         auto max_message_size = backend::max_message_size_for_runtime_record_limit(decltype(cfg)::max_record_size);
@@ -86,7 +86,7 @@ namespace un::log::test {
         auto before = un::log::detail::backend_stats();
         auto msg = std::string{"small-limit-"} + std::string(*max_message_size + 32u, 'x');
 
-        unlog::info("{}", msg);
+        unlog::info(route, "{}", msg);
 
         auto after = un::log::detail::backend_stats();
         CHECK(after.emitted == (before.emitted + 1u));

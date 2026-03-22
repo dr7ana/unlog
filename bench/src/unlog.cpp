@@ -7,22 +7,25 @@
 
 #include <filesystem>
 #include <mutex>
+#include <utility>
 
 namespace {
 
     struct unlog_provider {
+        using config_type =
+                unlog::config<unlog::options::threadsafe, unlog::options::huge_pages, unlog::options::pattern<"%v">>;
+        using channel_type = unlog::channel<unlog::detail::channel_policy_for<config_type>>;
+
         static constexpr std::string_view name() noexcept { return "unlog"; }
 
         static void initialize(const unlog_bench::benchmark_options& options) {
             std::call_once(init_flag(), [&options]() {
                 unlog::set_global_config({
-                        .mode = unlog::RuntimeMode::threadsafe,
                         .thread_bufsize = unlog_bench::thread_bufsize_bytes,
                 });
 
                 auto config = make_config(options);
-                config.format = "%v";
-                channel() = unlog::make_channel(config, true);
+                channel() = unlog::make_channel(config, false);
                 unlog::set_default_level(unlog::log_level::info);
                 unlog::info(channel(), "warmup");
                 unlog::flush();
@@ -50,8 +53,8 @@ namespace {
             return flag;
         }
 
-        static unlog::channel& channel() {
-            static unlog::channel instance;
+        static channel_type& channel() {
+            static channel_type instance;
             return instance;
         }
 
@@ -60,20 +63,20 @@ namespace {
             return fd;
         }
 
-        static unlog::config<> make_config(const unlog_bench::benchmark_options& options) {
+        static config_type make_config(const unlog_bench::benchmark_options& options) {
             switch (options.sink) {
                 case unlog_bench::sink_kind::file:
                     std::filesystem::create_directories(unlog_bench::ensure_output_dir());
-                    return unlog::config<>::make_file(unlog_bench::file_sink_path(name()).string(), "root");
+                    return config_type::make_file(unlog_bench::file_sink_path(name()).string(), "root");
                 case unlog_bench::sink_kind::stdout:
-                    return unlog::config<>::make("root");
+                    return config_type::make("root");
                 case unlog_bench::sink_kind::fd:
                     sink_fd() = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
                     if (sink_fd() < 0) {
                         throw std::runtime_error{"failed to open /dev/null"};
                     }
 
-                    return unlog::config<>::make_fd(sink_fd(), "root");
+                    return config_type::make_fd(sink_fd(), "root");
             }
 
             throw std::invalid_argument{"invalid sink kind"};

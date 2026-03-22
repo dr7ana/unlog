@@ -91,17 +91,17 @@ namespace un::log::test {
         runtime_state_guard guard;
 
         constexpr auto thread_bufsize = size_t{1} << 22;
-        auto expected_capacity = backend::runtime_queue_traits::queue_capacity_for(thread_bufsize);
+        auto expected_capacity = backend::runtime_queue_traits<false>::queue_capacity_for(thread_bufsize);
         REQUIRE(expected_capacity.has_value());
 
-        set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = thread_bufsize});
+        set_global_config(global_config{.thread_bufsize = thread_bufsize});
 
-        auto cfg = config<>::make("global-config-threadsafe");
-        make_channel(cfg, true);
+        auto cfg = config<options::threadsafe>::make("global-config-threadsafe");
+        make_channel(cfg, false);
 
         CHECK_NOTHROW(prewarm_thread());
-        auto& producer = detail::get_runtime_queue_producer(RuntimeMode::threadsafe);
-        CHECK(get_global_config().mode == RuntimeMode::threadsafe);
+        using policy = detail::channel_policy_for<decltype(cfg)>;
+        auto& producer = detail::get_runtime_queue_producer<policy>();
         CHECK(get_global_config().thread_bufsize == thread_bufsize);
         CHECK(producer.queue().capacity() == *expected_capacity);
     }
@@ -117,9 +117,10 @@ namespace un::log::test {
         runtime_state_guard guard;
 
         constexpr auto thread_bufsize = size_t{1} << 22;
-        set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = thread_bufsize});
-        auto route = make_channel("prewarm-worker", true);
-        util::capture_test_logs(log_level::info);
+        set_global_config(global_config{.thread_bufsize = thread_bufsize});
+        auto cfg = config<options::threadsafe>::make("prewarm-worker");
+        auto route = make_channel(cfg, false);
+        util::capture_test_logs(cfg, log_level::info);
 
         REQUIRE(test_helper::producer_count() == 1u);
 
@@ -174,9 +175,7 @@ namespace un::log::test {
     TEST_CASE("007 - global config rejects invalid thread buffer size", "[007][runtime][global-config]") {
         runtime_state_guard guard;
 
-        CHECK_THROWS_AS(
-                set_global_config(global_config{.mode = RuntimeMode::single_threaded, .thread_bufsize = 1u}),
-                std::invalid_argument);
+        CHECK_THROWS_AS(set_global_config(global_config{.thread_bufsize = 1u}), std::invalid_argument);
     }
 
     TEST_CASE("007 - channel rejects max_record_size too small for record metadata", "[007][runtime][channel]") {
@@ -206,7 +205,6 @@ namespace un::log::test {
 
         CHECK(runtime_ready() == false);
         CHECK(consumer_thread_started() == false);
-        CHECK(get_global_config().mode == RuntimeMode::single_threaded);
         CHECK(get_global_config().thread_bufsize == options::default_thread_bufsize);
     }
 
@@ -279,9 +277,7 @@ namespace un::log::test {
         auto cfg = config<>::make("lock-global-config");
         make_channel(cfg, true);
 
-        CHECK_THROWS_AS(
-                set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = 1 << 21}),
-                std::invalid_argument);
+        CHECK_THROWS_AS(set_global_config(global_config{.thread_bufsize = 1 << 21}), std::invalid_argument);
     }
 
 }  // namespace un::log::test

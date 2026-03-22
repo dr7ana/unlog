@@ -31,9 +31,17 @@ namespace un::log {
         struct steady final : public virtual clock {};
         struct system final : public virtual clock {};
 
+        struct runtime_mode_opt : public virtual opt {};
+        struct single_threaded final : public virtual runtime_mode_opt {};
+        struct threadsafe final : public virtual runtime_mode_opt {};
+
         struct overflow : public virtual opt {};
         struct drop final : public virtual overflow {};
         struct truncate final : public virtual overflow {};
+
+        struct huge_pages_opt : public virtual opt {};
+        struct normal_pages final : public virtual huge_pages_opt {};
+        struct huge_pages final : public virtual huge_pages_opt {};
 
         struct pattern_opt : public virtual opt {};
         template <detail::string_literal Pattern>
@@ -93,7 +101,6 @@ namespace un::log {
     inline constexpr channel_id invalid_channel_id = std::numeric_limits<channel_id>::max();
 
     struct global_config {
-        RuntimeMode mode{RuntimeMode::single_threaded};
         size_t thread_bufsize{options::default_thread_bufsize};
     };
 
@@ -124,7 +131,8 @@ namespace un::log {
 
     namespace detail {
         template <typename T, typename U = std::remove_cvref_t<T>>
-        concept base_opt_type = std::same_as<U, options::clock> || std::same_as<U, options::overflow>;
+        concept base_opt_type = std::same_as<U, options::clock> || std::same_as<U, options::runtime_mode_opt> ||
+                                std::same_as<U, options::overflow> || std::same_as<U, options::huge_pages_opt>;
 
         template <typename T, typename U = std::remove_cvref_t<T>>
         concept base_val_opt_type = std::same_as<U, options::max_record_opt>;
@@ -138,7 +146,8 @@ namespace un::log {
 
         template <typename T, typename U = std::remove_cvref_t<T>>
         concept channel_opt_type =
-                std::derived_from<U, options::clock> || std::derived_from<U, options::overflow> ||
+                std::derived_from<U, options::clock> || std::derived_from<U, options::runtime_mode_opt> ||
+                std::derived_from<U, options::overflow> || std::derived_from<U, options::huge_pages_opt> ||
                 std::derived_from<U, options::max_record_opt> || std::derived_from<U, options::pattern_opt>;
 
         template <typename... Arg>
@@ -150,7 +159,9 @@ namespace un::log {
         template <typename... Arg>
         concept valid_channel_opt_pack =
                 require_channel_opts<Arg...> && at_most_one_is_derived_from<options::clock, Arg...> &&
+                at_most_one_is_derived_from<options::runtime_mode_opt, Arg...> &&
                 at_most_one_is_derived_from<options::overflow, Arg...> &&
+                at_most_one_is_derived_from<options::huge_pages_opt, Arg...> &&
                 at_most_one_is_derived_from<options::max_record_opt, Arg...> &&
                 at_most_one_is_derived_from<options::pattern_opt, Arg...>;
 
@@ -224,8 +235,12 @@ namespace un::log {
         template <typename Conf>
         concept basic_config_type = requires(const Conf& conf) {
             typename Conf::clock_type;
+            typename Conf::runtime_mode_type;
             typename Conf::overflow_type;
+            typename Conf::huge_pages_type;
             typename Conf::pattern_type;
+            { Conf::runtime_mode } -> std::convertible_to<RuntimeMode>;
+            { Conf::use_huge_pages } -> std::convertible_to<bool>;
             { Conf::max_record_size } -> std::convertible_to<size_t>;
             { Conf::format_requirements } -> std::convertible_to<backend::time_requirements>;
             { conf.name } -> std::convertible_to<std::string_view>;
@@ -240,6 +255,9 @@ namespace un::log {
         template <basic_config_type Conf>
         inline constexpr auto config_clock_type_v =
                 std::derived_from<typename Conf::clock_type, options::system> ? ClockType::system : ClockType::steady;
+
+        template <basic_config_type Conf>
+        inline constexpr auto config_runtime_mode_v = Conf::runtime_mode;
 
         template <basic_config_type Conf>
         inline constexpr auto config_overflow_policy_v =
@@ -276,9 +294,15 @@ namespace un::log {
         requires detail::valid_channel_opt_pack<Arg...>
     struct config {
         using clock_type = detail::resolve_opt_t<options::clock, options::steady, Arg...>;
+        using runtime_mode_type = detail::resolve_opt_t<options::runtime_mode_opt, options::single_threaded, Arg...>;
         using overflow_type = detail::resolve_opt_t<options::overflow, options::drop, Arg...>;
+        using huge_pages_type = detail::resolve_opt_t<options::huge_pages_opt, options::normal_pages, Arg...>;
         using pattern_type = detail::resolve_pattern_opt_t<default_pattern_type, Arg...>;
 
+        static constexpr auto runtime_mode = std::derived_from<runtime_mode_type, options::threadsafe>
+                                                   ? RuntimeMode::threadsafe
+                                                   : RuntimeMode::single_threaded;
+        static constexpr bool use_huge_pages = std::derived_from<huge_pages_type, options::huge_pages>;
         static constexpr auto max_record_size =
                 detail::resolve_val_opt_v<options::max_record_opt, default_max_record_size, Arg...>;
         static constexpr auto format_requirements = pattern_type::requirements;

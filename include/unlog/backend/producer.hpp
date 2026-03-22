@@ -15,6 +15,8 @@
 
 namespace un::log::backend {
 
+    inline constexpr size_t explicit_huge_page_bytes{size_t{2} << 20};
+
     struct alignas(64) producer_active_word {
         std::atomic<uint64_t> bits{0};
     };
@@ -34,23 +36,32 @@ namespace un::log::backend {
         return capacity;
     }
 
-    template <size_t MaxRecordSize>
+    template <size_t MaxRecordSize, bool HugePages>
     struct queue_runtime_traits {
         using record_slot = basic_record_slot<MaxRecordSize>;
         static_assert(valid_record_slot_v<MaxRecordSize>);
 
         static constexpr size_t slot_size = sizeof(record_slot);
-        using queue_type = utl::spsc_queue<record_slot, utl::dynamic_extent>;
+        using queue_type =
+                utl::spsc_queue<record_slot, utl::dynamic_extent, utl::spsc_allocator<record_slot, HugePages>>;
+
+        [[nodiscard]] static constexpr size_t effective_thread_buffer_size(size_t thread_buffer_size) noexcept {
+            if constexpr (HugePages) {
+                return explicit_huge_page_bytes;
+            }
+
+            return thread_buffer_size;
+        }
 
         [[nodiscard]] static constexpr std::optional<size_t> queue_capacity_for(size_t thread_buffer_size) noexcept {
-            return queue_slot_capacity_for(thread_buffer_size, slot_size);
+            return queue_slot_capacity_for(effective_thread_buffer_size(thread_buffer_size), slot_size);
         }
     };
 
-    template <size_t MaxRecordSize>
+    template <size_t MaxRecordSize, bool HugePages>
     class queue_producer {
       public:
-        using traits = queue_runtime_traits<MaxRecordSize>;
+        using traits = queue_runtime_traits<MaxRecordSize, HugePages>;
         using record_slot = typename traits::record_slot;
         using queue_type = typename traits::queue_type;
 
@@ -150,7 +161,10 @@ namespace un::log::backend {
 #endif
     };
 
-    using runtime_queue_traits = queue_runtime_traits<options::default_max_record_size>;
-    using runtime_queue_producer = queue_producer<options::default_max_record_size>;
+    template <bool HugePages>
+    using runtime_queue_traits = queue_runtime_traits<options::default_max_record_size, HugePages>;
+
+    template <bool HugePages>
+    using runtime_queue_producer = queue_producer<options::default_max_record_size, HugePages>;
 
 }  // namespace un::log::backend

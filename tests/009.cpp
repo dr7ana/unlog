@@ -5,7 +5,7 @@
 namespace un::log::test {
 
     TEST_CASE("009 - queue runtime traits derive power-of-two capacity from thread buffer", "[009][queue][traits]") {
-        using traits = backend::queue_runtime_traits<256>;
+        using traits = backend::queue_runtime_traits<256, false>;
         auto capacity = traits::queue_capacity_for(4096);
 
         REQUIRE(capacity.has_value());
@@ -16,7 +16,7 @@ namespace un::log::test {
     }
 
     TEST_CASE("009 - queue producer stores fixed record slots through spsc queue", "[009][queue][producer]") {
-        using producer_t = backend::queue_producer<256>;
+        using producer_t = backend::queue_producer<256, false>;
         using record_slot_t = producer_t::record_slot;
 
         auto producer = producer_t{42u, 4096u};
@@ -70,7 +70,7 @@ namespace un::log::test {
     }
 
     TEST_CASE("009 - queue producer callback can cancel publish", "[009][queue][producer]") {
-        using producer_t = backend::queue_producer<256>;
+        using producer_t = backend::queue_producer<256, false>;
         using record_slot_t = producer_t::record_slot;
 
         auto producer = producer_t{42u, 4096u};

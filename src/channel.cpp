@@ -28,66 +28,16 @@
 
 namespace un::log {
     namespace detail {
-        // Clock constraint for timestamp capture, aligned with the C++ named requirement TrivialClock.
-        template <typename Clock>
-        concept log_clock = requires {
-            typename Clock::time_point;
-            { Clock::now() } noexcept -> std::same_as<typename Clock::time_point>;
-            { Clock::is_steady } -> std::convertible_to<const bool&>;
-        };
-
-        template <log_clock Clock>
-        static constexpr uint64_t clock_now_ns() noexcept {
-            auto now = Clock::now().time_since_epoch();
-            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
-        }
-
-        template <ClockType Type>
-        static constexpr uint64_t clock_now_ns_for() noexcept {
-            if constexpr (Type == ClockType::system)
-                return clock_now_ns<std::chrono::system_clock>();
-
-            return clock_now_ns<std::chrono::steady_clock>();
-        }
-
-        template <ClockType Type>
-        static constexpr clock_now_fn_t clock_now_fn_for() noexcept {
-            return &clock_now_ns_for<Type>;
-        }
-
-        static constexpr clock_now_fn_t clock_now_fn_for(ClockType type) noexcept {
-            if (type == ClockType::system) {
-                return &clock_now_ns_for<ClockType::system>;
-            }
-
-            return &clock_now_ns_for<ClockType::steady>;
-        }
-
         struct channel_state {
-            channel_state(std::string channel_name, size_t max_message_size, bool overflow_drop, bool can_truncate) :
-                    name{std::move(channel_name)},
-                    max_message_size{max_message_size},
-                    overflow_drop{overflow_drop},
-                    can_truncate{can_truncate} {}
+            channel_state(std::string channel_name, size_t max_message_size) :
+                    name{std::move(channel_name)}, max_message_size{max_message_size} {}
 
             void set_level(log_level level) noexcept { level_.store(level, std::memory_order_relaxed); }
 
             [[nodiscard]] log_level level() const noexcept { return level_.load(std::memory_order_relaxed); }
 
-            [[nodiscard]] channel_runtime_view runtime_view() const noexcept {
-                return channel_runtime_view{
-                        .channel_name = name.c_str(),
-                        .max_message_size = max_message_size,
-                        .overflow_drop = overflow_drop,
-                        .can_truncate = can_truncate,
-                        .threshold = level(),
-                };
-            }
-
             std::string name;
             size_t max_message_size{0};
-            bool overflow_drop{true};
-            bool can_truncate{false};
 
           private:
             std::atomic<log_level> level_{log_level::info};
@@ -104,20 +54,29 @@ namespace un::log {
             backend::time_requirements time_requirements{backend::time_requirements::none};
         };
 
-        using runtime_queue_producer = backend::runtime_queue_producer;
+        template <bool HugePages>
+        using runtime_queue_producer = backend::runtime_queue_producer<HugePages>;
+
+        template <bool HugePages>
+        using runtime_queue_traits = backend::runtime_queue_traits<HugePages>;
 
         static constexpr size_t threadsafe_producer_capacity{16384};
         static constexpr size_t threadsafe_active_word_capacity =
                 (threadsafe_producer_capacity + size_t{63}) / size_t{64};
 
+        template <bool HugePages>
         struct queue_producer_registry {
+            using producer_type = runtime_queue_producer<HugePages>;
+            using producer_ref = std::reference_wrapper<producer_type>;
+            using active_word_ref = std::reference_wrapper<backend::producer_active_word>;
+
             std::mutex mutex;
-            std::deque<runtime_queue_producer> producer_storage;
+            std::deque<producer_type> producer_storage;
             std::deque<backend::producer_active_word> active_word_storage;
-            std::vector<std::optional<std::reference_wrapper<runtime_queue_producer>>> producer_slots;
-            std::vector<std::reference_wrapper<backend::producer_active_word>> active_words;
-            std::atomic<std::optional<std::reference_wrapper<runtime_queue_producer>>*> producers_base{nullptr};
-            std::atomic<std::reference_wrapper<backend::producer_active_word>*> active_words_base{nullptr};
+            std::vector<std::optional<producer_ref>> producer_slots;
+            std::vector<active_word_ref> active_words;
+            std::atomic<std::optional<producer_ref>*> producers_base{nullptr};
+            std::atomic<active_word_ref*> active_words_base{nullptr};
             std::atomic<size_t> producer_count{0};
         };
 
@@ -131,7 +90,6 @@ namespace un::log {
             bool global_config_locked{false};
             ClockType clock_type{ClockType::steady};
             bool clock_type_set{false};
-            clock_now_fn_t clock_now_fn{clock_now_fn_for<ClockType::steady>()};
             log_level default_level{log_level::info};
             // TODO(multithread-hardening): if setup/logging can run concurrently at high thread counts,
             // revisit this gate with explicit acquire/release ordering and stronger transition semantics.
@@ -146,8 +104,12 @@ namespace un::log {
             bool stop_requested{false};
             std::atomic<uint64_t> flush_requested{0};
             std::atomic<uint64_t> flush_completed{0};
-            std::unique_ptr<backend::runtime_queue_producer> single_threaded_producer;
-            queue_producer_registry producer_registry;
+            std::unique_ptr<runtime_queue_producer<false>> single_threaded_producer_normal;
+            std::unique_ptr<runtime_queue_producer<true>> single_threaded_producer_huge;
+            queue_producer_registry<false> producer_registry_normal;
+            queue_producer_registry<true> producer_registry_huge;
+            size_t threadsafe_normal_channel_count{0};
+            size_t threadsafe_huge_channel_count{0};
         };
 
         struct runtime_control {
@@ -297,20 +259,19 @@ namespace un::log {
             return &st.channels[index];
         }
 
-        static channel make_channel_handle(const runtime_state& st, channel_id id) noexcept {
+        static channel_handle make_channel_handle(const runtime_state& st, channel_id id) noexcept {
             auto* state = find_channel_state(st, id);
             if (!state) {
                 return {};
             }
 
-            return channel{id, state->name};
+            return channel_handle{id, state->name, state->max_message_size};
         }
 
         static void set_runtime_clock_type(runtime_state& st, ClockType type) {
             if (!st.clock_type_set) {
                 st.clock_type = type;
                 st.clock_type_set = true;
-                st.clock_now_fn = clock_now_fn_for(type);
                 return;
             }
 
@@ -320,7 +281,7 @@ namespace un::log {
         }
 
         static void validate_global_config(const global_config& cfg) {
-            if (!backend::runtime_queue_traits::queue_capacity_for(cfg.thread_bufsize).has_value()) {
+            if (!runtime_queue_traits<false>::queue_capacity_for(cfg.thread_bufsize).has_value()) {
                 throw std::invalid_argument{
                         "global thread_bufsize does not provide enough capacity for one producer record slot"};
             }
@@ -393,6 +354,13 @@ namespace un::log {
             }
         }
 
+        static constexpr bool uses_default_channel_policy(const channel_registration& registration) noexcept {
+            return registration.runtime_mode == default_channel_policy::runtime_mode &&
+                   registration.timestamp_mode == default_channel_policy::clock_type &&
+                   registration.overflow_drop == (default_channel_policy::overflow_policy == OverflowPolicy::drop) &&
+                   registration.huge_pages == default_channel_policy::huge_pages;
+        }
+
         static void add_configured_sink_locked(runtime_state& st, const channel_registration& registration) {
             auto key = sink_target_key(
                     registration.sink_type,
@@ -430,16 +398,51 @@ namespace un::log {
             return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
         }
 
-        static void reconfigure_runtime_queue_producers(runtime_state& st, size_t thread_bufsize) {
-            if (st.single_threaded_producer) {
-                st.single_threaded_producer->reconfigure(thread_bufsize);
+        template <bool HugePages>
+        static std::unique_ptr<runtime_queue_producer<HugePages>>& single_threaded_producer_slot(runtime_state& st) {
+            if constexpr (HugePages) {
+                return st.single_threaded_producer_huge;
+            }
+            else {
+                return st.single_threaded_producer_normal;
+            }
+        }
+
+        template <bool HugePages>
+        static queue_producer_registry<HugePages>& producer_registry_slot(runtime_state& st) {
+            if constexpr (HugePages) {
+                return st.producer_registry_huge;
+            }
+            else {
+                return st.producer_registry_normal;
+            }
+        }
+
+        template <bool HugePages>
+        static void reconfigure_threadsafe_registry(runtime_state& st, size_t thread_bufsize) {
+            auto& registry = producer_registry_slot<HugePages>(st);
+            auto producer_count = registry.producer_count.load(std::memory_order_acquire);
+            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
+            if (!producers_base) {
+                return;
             }
 
-            auto producer_count = st.producer_registry.producer_count.load(std::memory_order_acquire);
-            auto* producers_base = st.producer_registry.producers_base.load(std::memory_order_acquire);
             for (size_t i = 0; i < producer_count; ++i) {
                 producers_base[i]->get().reconfigure(thread_bufsize);
             }
+        }
+
+        static void reconfigure_runtime_queue_producers(runtime_state& st, size_t thread_bufsize) {
+            if (st.single_threaded_producer_normal) {
+                st.single_threaded_producer_normal->reconfigure(thread_bufsize);
+            }
+
+            if (st.single_threaded_producer_huge) {
+                st.single_threaded_producer_huge->reconfigure(thread_bufsize);
+            }
+
+            reconfigure_threadsafe_registry<false>(st, thread_bufsize);
+            reconfigure_threadsafe_registry<true>(st, thread_bufsize);
         }
 
         static void ensure_global_config_locked(runtime_state& st) {
@@ -448,15 +451,12 @@ namespace un::log {
             }
 
             validate_global_config(st.global);
-            if (st.global.mode == RuntimeMode::single_threaded && !st.single_threaded_producer) {
-                st.single_threaded_producer =
-                        std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize);
-            }
             reconfigure_runtime_queue_producers(st, st.global.thread_bufsize);
             st.global_config_locked = true;
         }
 
-        static void ensure_threadsafe_registry_storage_locked(queue_producer_registry& registry) {
+        template <bool HugePages>
+        static void ensure_threadsafe_registry_storage_locked(queue_producer_registry<HugePages>& registry) {
             if (registry.producer_slots.empty()) {
                 registry.producer_slots.resize(threadsafe_producer_capacity);
                 registry.producers_base.store(registry.producer_slots.data(), std::memory_order_release);
@@ -476,33 +476,45 @@ namespace un::log {
             }
         }
 
-        static runtime_queue_producer& register_runtime_queue_producer(runtime_state& st) {
-            std::lock_guard lock{st.producer_registry.mutex};
-            ensure_threadsafe_registry_storage_locked(st.producer_registry);
+        template <bool HugePages>
+        static runtime_queue_producer<HugePages>& register_runtime_queue_producer(runtime_state& st) {
+            auto& registry = producer_registry_slot<HugePages>(st);
+            std::lock_guard lock{registry.mutex};
+            ensure_threadsafe_registry_storage_locked(registry);
 
-            auto producer_index = st.producer_registry.producer_storage.size();
+            auto producer_index = registry.producer_storage.size();
             if (producer_index >= threadsafe_producer_capacity) {
                 throw std::runtime_error{"threadsafe producer capacity exceeded"};
             }
 
-            st.producer_registry.producer_storage.emplace_back(current_thread_id(), st.global.thread_bufsize);
-            auto& producer = st.producer_registry.producer_storage.back();
-            st.producer_registry.producer_slots[producer_index] = std::ref(producer);
+            registry.producer_storage.emplace_back(current_thread_id(), st.global.thread_bufsize);
+            auto& producer = registry.producer_storage.back();
+            registry.producer_slots[producer_index] = std::ref(producer);
 
-            auto* active_words_base = st.producer_registry.active_words_base.load(std::memory_order_acquire);
+            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
             producer.bind_active_word(active_words_base[producer_index / size_t{64}].get(), producer_index);
-            st.producer_registry.producer_count.store(producer_index + size_t{1}, std::memory_order_release);
+            registry.producer_count.store(producer_index + size_t{1}, std::memory_order_release);
             return producer;
         }
 
-        static runtime_queue_producer& single_threaded_runtime_queue_producer() {
+        template <bool HugePages>
+        static runtime_queue_producer<HugePages>& single_threaded_runtime_queue_producer() {
             auto& st = access_state();
-            if (!st.single_threaded_producer) {
-                st.single_threaded_producer =
-                        std::make_unique<runtime_queue_producer>(current_thread_id(), st.global.thread_bufsize);
+            auto& producer = single_threaded_producer_slot<HugePages>(st);
+            if (!producer) {
+                producer = std::make_unique<runtime_queue_producer<HugePages>>(
+                        current_thread_id(), st.global.thread_bufsize);
             }
 
-            return *st.single_threaded_producer;
+            return *producer;
+        }
+
+        runtime_queue_producer_t<false>& single_threaded_runtime_queue_producer_normal() {
+            return single_threaded_runtime_queue_producer<false>();
+        }
+
+        runtime_queue_producer_t<true>& single_threaded_runtime_queue_producer_huge() {
+            return single_threaded_runtime_queue_producer<true>();
         }
 
         struct tls_runtime_queue_state {
@@ -511,62 +523,71 @@ namespace un::log {
             size_t producer_index{std::numeric_limits<size_t>::max()};
         };
 
-        static runtime_queue_producer& ensure_threadsafe_runtime_queue_producer(runtime_state& st) {
+        template <bool HugePages>
+        static runtime_queue_producer<HugePages>& ensure_threadsafe_runtime_queue_producer(runtime_state& st) {
             static thread_local tls_runtime_queue_state tls_state;
             auto generation = access_control().generation.load(std::memory_order_acquire);
             if (tls_state.owner != &st || tls_state.generation != generation ||
                 tls_state.producer_index == std::numeric_limits<size_t>::max()) {
-                auto& producer = register_runtime_queue_producer(st);
+                auto& producer = register_runtime_queue_producer<HugePages>(st);
                 tls_state.owner = &st;
                 tls_state.generation = generation;
                 tls_state.producer_index = producer.producer_index();
             }
 
-            auto* producers_base = st.producer_registry.producers_base.load(std::memory_order_acquire);
+            auto& registry = producer_registry_slot<HugePages>(st);
+            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
             return producers_base[tls_state.producer_index]->get();
         }
 
-        backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode) {
-            auto& st = access_state();
-            if (runtime_mode == RuntimeMode::single_threaded) {
-                return single_threaded_runtime_queue_producer();
-            }
+        runtime_queue_producer_t<false>& ensure_threadsafe_runtime_queue_producer_normal() {
+            return ensure_threadsafe_runtime_queue_producer<false>(access_state());
+        }
 
-            return ensure_threadsafe_runtime_queue_producer(st);
+        runtime_queue_producer_t<true>& ensure_threadsafe_runtime_queue_producer_huge() {
+            return ensure_threadsafe_runtime_queue_producer<true>(access_state());
         }
 
 #if UNLOG_DIAGNOSTIC
-        static std::vector<runtime_queue_producer*> runtime_queue_producer_snapshot() {
+        static std::vector<backend::producer_stats> runtime_queue_producer_snapshot() {
             auto* st = try_access_state();
             if (!st) {
                 return {};
             }
 
-            if (st->global.mode == RuntimeMode::single_threaded) {
-                if (!st->single_threaded_producer) {
-                    return {};
+            auto out = std::vector<backend::producer_stats>{};
+
+            if (st->single_threaded_producer_normal) {
+                out.push_back(st->single_threaded_producer_normal->stats());
+            }
+
+            if (st->single_threaded_producer_huge) {
+                out.push_back(st->single_threaded_producer_huge->stats());
+            }
+
+            auto collect = [&out]<bool HugePages>(queue_producer_registry<HugePages>& registry) {
+                auto producer_count = registry.producer_count.load(std::memory_order_acquire);
+                auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
+                if (!producers_base) {
+                    return;
                 }
 
-                return {st->single_threaded_producer.get()};
-            }
+                out.reserve(out.size() + producer_count);
+                for (size_t i = 0; i < producer_count; ++i) {
+                    out.push_back(producers_base[i]->get().stats());
+                }
+            };
 
-            auto producer_count = st->producer_registry.producer_count.load(std::memory_order_acquire);
-            auto* producers_base = st->producer_registry.producers_base.load(std::memory_order_acquire);
-            auto snapshot = std::vector<runtime_queue_producer*>{};
-            snapshot.reserve(producer_count);
-            for (size_t i = 0; i < producer_count; ++i) {
-                snapshot.push_back(&producers_base[i]->get());
-            }
-            return snapshot;
+            collect(st->producer_registry_normal);
+            collect(st->producer_registry_huge);
+            return out;
         }
 #endif
 
-        static bool runtime_has_pending_work(runtime_state& runtime) {
-            if (runtime.global.mode == RuntimeMode::single_threaded) {
-                return runtime.single_threaded_producer && !runtime.single_threaded_producer->queue().empty();
-            }
-
-            auto* active_words_base = runtime.producer_registry.active_words_base.load(std::memory_order_acquire);
+        template <bool HugePages>
+        static bool registry_has_pending_work(runtime_state& runtime) {
+            auto& registry = producer_registry_slot<HugePages>(runtime);
+            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
             if (!active_words_base) {
                 return false;
             }
@@ -578,6 +599,18 @@ namespace un::log {
             }
 
             return false;
+        }
+
+        static bool runtime_has_pending_work(runtime_state& runtime) {
+            if (runtime.single_threaded_producer_normal && !runtime.single_threaded_producer_normal->queue().empty()) {
+                return true;
+            }
+
+            if (runtime.single_threaded_producer_huge && !runtime.single_threaded_producer_huge->queue().empty()) {
+                return true;
+            }
+
+            return registry_has_pending_work<false>(runtime) || registry_has_pending_work<true>(runtime);
         }
 
         auto runtime_startup_steady_time = std::chrono::steady_clock::now();
@@ -714,7 +747,7 @@ namespace un::log {
                 runtime_state& runtime,
                 const consumer_sink_snapshot& sinks,
                 consumer_scratch& scratch,
-                runtime_queue_producer& producer) {
+                auto& producer) {
             auto drained_total = size_t{0};
 
             for (;;) {
@@ -737,46 +770,53 @@ namespace un::log {
             }
         }
 
+        template <bool HugePages>
+        static size_t drain_threadsafe_registry_queues(
+                runtime_state& runtime, const consumer_sink_snapshot& sinks, consumer_scratch& scratch) {
+            auto& registry = producer_registry_slot<HugePages>(runtime);
+            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
+            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
+            if (!active_words_base || !producers_base) {
+                return 0;
+            }
+
+            auto drained_pass = size_t{0};
+            for (size_t word_index = 0; word_index < threadsafe_active_word_capacity; ++word_index) {
+                auto pending = active_words_base[word_index].get().bits.exchange(0, std::memory_order_acq_rel);
+                while (pending != 0) {
+                    auto bit_index = static_cast<size_t>(std::countr_zero(pending));
+                    auto producer_index = word_index * size_t{64} + bit_index;
+                    auto producer_count = registry.producer_count.load(std::memory_order_acquire);
+                    if (producer_index < producer_count) {
+                        drained_pass += drain_runtime_queue_producer(
+                                runtime, sinks, scratch, producers_base[producer_index]->get());
+                    }
+                    pending &= pending - uint64_t{1};
+                }
+            }
+
+            return drained_pass;
+        }
+
         static size_t drain_runtime_queues(runtime_state& runtime, consumer_scratch& scratch) {
             auto drained_total = size_t{0};
 
             for (;;) {
                 auto sinks = sink_snapshot(runtime);
-
-                if (runtime.global.mode == RuntimeMode::single_threaded) {
-                    if (!runtime.single_threaded_producer) {
-                        return drained_total;
-                    }
-
-                    auto drained_pass =
-                            drain_runtime_queue_producer(runtime, *sinks, scratch, *runtime.single_threaded_producer);
-                    drained_total += drained_pass;
-                    if (drained_pass == 0) {
-                        return drained_total;
-                    }
-                    continue;
-                }
-
                 auto drained_pass = size_t{0};
-                auto* active_words_base = runtime.producer_registry.active_words_base.load(std::memory_order_acquire);
-                auto* producers_base = runtime.producer_registry.producers_base.load(std::memory_order_acquire);
-                if (!active_words_base || !producers_base) {
-                    return drained_total;
+
+                if (runtime.single_threaded_producer_normal) {
+                    drained_pass += drain_runtime_queue_producer(
+                            runtime, *sinks, scratch, *runtime.single_threaded_producer_normal);
                 }
 
-                for (size_t word_index = 0; word_index < threadsafe_active_word_capacity; ++word_index) {
-                    auto pending = active_words_base[word_index].get().bits.exchange(0, std::memory_order_acq_rel);
-                    while (pending != 0) {
-                        auto bit_index = static_cast<size_t>(std::countr_zero(pending));
-                        auto producer_index = word_index * size_t{64} + bit_index;
-                        auto producer_count = runtime.producer_registry.producer_count.load(std::memory_order_acquire);
-                        if (producer_index < producer_count) {
-                            drained_pass += drain_runtime_queue_producer(
-                                    runtime, *sinks, scratch, producers_base[producer_index]->get());
-                        }
-                        pending &= pending - uint64_t{1};
-                    }
+                if (runtime.single_threaded_producer_huge) {
+                    drained_pass += drain_runtime_queue_producer(
+                            runtime, *sinks, scratch, *runtime.single_threaded_producer_huge);
                 }
+
+                drained_pass += drain_threadsafe_registry_queues<false>(runtime, *sinks, scratch);
+                drained_pass += drain_threadsafe_registry_queues<true>(runtime, *sinks, scratch);
 
                 if (drained_pass == 0) {
                     return drained_total;
@@ -836,11 +876,23 @@ namespace un::log {
             runtime.consumer_started = true;
         }
 
-        static void ensure_runtime_initialized_locked(runtime_state& st) {
+        static void ensure_runtime_initialized_locked(runtime_state& st, const channel_registration& registration) {
             ensure_global_config_locked(st);
             ensure_consumer_started_locked(st);
-            if (st.global.mode == RuntimeMode::threadsafe) {
-                std::ignore = ensure_threadsafe_runtime_queue_producer(st);
+
+            if (registration.runtime_mode == RuntimeMode::threadsafe) {
+                if (registration.huge_pages) {
+                    std::ignore = ensure_threadsafe_runtime_queue_producer<true>(st);
+                }
+                else {
+                    std::ignore = ensure_threadsafe_runtime_queue_producer<false>(st);
+                }
+            }
+        }
+
+        void notify_runtime_work_available() noexcept {
+            if (auto* st = try_access_state()) {
+                st->consumer_cv.notify_one();
             }
         }
 
@@ -853,20 +905,7 @@ namespace un::log {
             }
         }
 
-        void note_runtime_work_available(runtime_queue_producer& producer, RuntimeMode runtime_mode) noexcept {
-            if (!producer.try_mark_enqueued()) {
-                return;
-            }
-
-            if (auto* st = try_access_state()) {
-                if (runtime_mode == RuntimeMode::threadsafe) {
-                    producer.publish_ready_bit();
-                }
-                st->consumer_cv.notify_one();
-            }
-        }
-
-        static channel make_channel_route_locked(
+        static channel_handle make_channel_route_locked(
                 runtime_state& st, channel_registration registration, bool make_default, bool allow_after_activation) {
 
             if (!allow_after_activation && st.is_active.load(std::memory_order_relaxed)) {
@@ -886,26 +925,39 @@ namespace un::log {
                 throw std::invalid_argument{"channel message limit exceeds runtime queue slot payload capacity"};
             }
 
+            auto can_be_default = uses_default_channel_policy(registration);
+            if (make_default && !can_be_default) {
+                throw std::invalid_argument{"default channel must use the library default runtime policy"};
+            }
+
             set_runtime_clock_type(st, registration.timestamp_mode);
             add_configured_sink_locked(st, registration);
 
             auto id = static_cast<channel_id>(st.channels.size());
-            st.channels.emplace_back(
-                    std::move(channel_name),
-                    registration.max_message_size,
-                    registration.overflow_drop,
-                    registration.can_truncate);
+            st.channels.emplace_back(std::move(channel_name), registration.max_message_size);
 
             auto& state = st.channels.back();
             state.set_level(st.default_level);
             st.channel_ids.emplace(state.name, id);
 
-            if (make_default || !st.default_channel_id.has_value()) {
+            if (registration.runtime_mode == RuntimeMode::threadsafe) {
+                if (registration.huge_pages) {
+                    ++st.threadsafe_huge_channel_count;
+                }
+                else {
+                    ++st.threadsafe_normal_channel_count;
+                }
+            }
+
+            if (make_default) {
+                st.default_channel_id = id;
+            }
+            else if (!st.default_channel_id.has_value() && can_be_default) {
                 st.default_channel_id = id;
             }
 
-            ensure_runtime_initialized_locked(st);
-            return channel{id, state.name};
+            ensure_runtime_initialized_locked(st, registration);
+            return channel_handle{id, state.name, state.max_message_size};
         }
 
         static void ensure_default_channel(runtime_state& st) {
@@ -924,7 +976,9 @@ namespace un::log {
                             .max_message_size = max_message_size,
                             .overflow_drop = detail::config_overflow_policy_v<decltype(conf)> == OverflowPolicy::drop,
                             .can_truncate = true,
+                            .runtime_mode = detail::config_runtime_mode_v<decltype(conf)>,
                             .timestamp_mode = detail::config_clock_type_v<decltype(conf)>,
+                            .huge_pages = decltype(conf)::use_huge_pages,
                             .sink_type = detail::config_sink_type(conf),
                             .format = conf.format,
                             .time_requirements = detail::config_format_requirements(conf),
@@ -957,7 +1011,7 @@ namespace un::log {
             }
         }
 
-        channel make_channel_route(channel_registration registration, bool make_default) {
+        channel_handle make_channel_route(channel_registration registration, bool make_default) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
@@ -1003,13 +1057,8 @@ namespace un::log {
 #if UNLOG_DIAGNOSTIC
         backend::producer_stats backend_stats() {
             auto out = backend::producer_stats{};
-            auto producers = runtime_queue_producer_snapshot();
-            for (auto* producer : producers) {
-                if (!producer) {
-                    continue;
-                }
-
-                auto snapshot = producer->stats();
+            auto snapshots = runtime_queue_producer_snapshot();
+            for (const auto& snapshot : snapshots) {
                 out.emitted += snapshot.emitted;
                 out.dropped += snapshot.dropped;
                 out.truncated += snapshot.truncated;
@@ -1017,27 +1066,6 @@ namespace un::log {
             return out;
         }
 #endif
-
-        channel_runtime_view channel_runtime_view_for(channel_id id) noexcept {
-            if (runtime_is_shutting_down()) {
-                return {};
-            }
-
-            auto* st = try_access_state();
-            if (!st) {
-                return {};
-            }
-
-            auto* state = find_channel_state(*st, id);
-            if (!state) {
-                return {};
-            }
-
-            auto view = state->runtime_view();
-            view.runtime_mode = st->global.mode;
-            view.clock_now_fn = st->clock_now_fn;
-            return view;
-        }
 
         void set_channel_level(channel_id id, log_level level) noexcept {
             if (auto* st = try_access_state()) {
@@ -1097,15 +1125,16 @@ namespace un::log {
 
         size_t threadsafe_producer_count() {
             auto* st = detail::try_access_state();
-            if (!st || st->global.mode != RuntimeMode::threadsafe) {
+            if (!st) {
                 return 0;
             }
 
-            return st->producer_registry.producer_count.load(std::memory_order_acquire);
+            return st->producer_registry_normal.producer_count.load(std::memory_order_acquire) +
+                   st->producer_registry_huge.producer_count.load(std::memory_order_acquire);
         }
     }  // namespace test
 
-    channel global_channel() {
+    channel<> global_channel() {
         if (detail::runtime_is_shutting_down()) {
             return {};
         }
@@ -1120,7 +1149,8 @@ namespace un::log {
             return {};
         }
 
-        return detail::make_channel_handle(st, *st.default_channel_id);
+        auto handle = detail::make_channel_handle(st, *st.default_channel_id);
+        return channel<>{handle.id, handle.name, handle.max_message_size};
     }
 
     void set_global_config(global_config cfg) {
@@ -1159,11 +1189,13 @@ namespace un::log {
             return;
         }
 
-        if (st->global.mode != RuntimeMode::threadsafe) {
-            return;
+        if (st->threadsafe_normal_channel_count != 0) {
+            std::ignore = detail::ensure_threadsafe_runtime_queue_producer<false>(*st);
         }
 
-        std::ignore = detail::ensure_threadsafe_runtime_queue_producer(*st);
+        if (st->threadsafe_huge_channel_count != 0) {
+            std::ignore = detail::ensure_threadsafe_runtime_queue_producer<true>(*st);
+        }
     }
 
     void flush() {

@@ -31,12 +31,11 @@ namespace un::log::test {
     TEST_CASE("001 - global config defaults", "[001][config][global]") {
         auto cfg = get_global_config();
 
-        CHECK(cfg.mode == RuntimeMode::single_threaded);
         CHECK(cfg.thread_bufsize == options::default_thread_bufsize);
     }
 
     TEST_CASE("001 - runtime queue capacity derives from global thread buffer size", "[001][config][global]") {
-        auto capacity = backend::runtime_queue_traits::queue_capacity_for(options::default_thread_bufsize);
+        auto capacity = backend::runtime_queue_traits<false>::queue_capacity_for(options::default_thread_bufsize);
 
         REQUIRE(capacity.has_value());
         CHECK(capacity.value() > 0u);

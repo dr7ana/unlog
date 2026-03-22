@@ -46,15 +46,14 @@ namespace un::log::test {
         CHECK_NOTHROW(make_channel(second_cfg, false));
     }
 
-    TEST_CASE("005 - rejects mixed runtime modes", "[005][backend][mode]") {
+    TEST_CASE("005 - allows mixed runtime modes", "[005][backend][mode]") {
         runtime_state_guard guard;
 
         auto first_cfg = config<>::make("single-threaded");
         make_channel(first_cfg, true);
 
-        CHECK_THROWS_AS(
-                set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = 1 << 20}),
-                std::invalid_argument);
+        auto second_cfg = config<options::threadsafe>::make("threadsafe");
+        CHECK_NOTHROW(make_channel(second_cfg, false));
     }
 
     TEST_CASE("005 - default channel writes to attached sink", "[005][backend][sink]") {
@@ -75,10 +74,8 @@ namespace un::log::test {
     TEST_CASE("005 - explicit threadsafe mode supports multi-threaded logging", "[005][backend][mode]") {
         runtime_state_guard guard;
 
-        set_global_config(global_config{.mode = RuntimeMode::threadsafe, .thread_bufsize = 1 << 20});
-
-        auto cfg = config<>::make("threadsafe-runtime");
-        auto route = make_channel(cfg, true);
+        auto cfg = config<options::threadsafe>::make("threadsafe-runtime");
+        auto route = make_channel(cfg, false);
         util::capture_test_logs(cfg);
 
         std::jthread worker{[route] { unlog::info(route, "threadsafe-worker-message"); }};

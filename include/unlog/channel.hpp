@@ -8,6 +8,7 @@
 #include "unlog/backend/record.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -23,10 +24,58 @@ namespace un::log {
 
     using sink_ptr = backend::sink_ptr;
 
-    class channel;
-
     namespace detail {
-        using clock_now_fn_t = uint64_t (*)() noexcept;
+        template <
+                RuntimeMode Mode,
+                ClockType Clock,
+                OverflowPolicy Overflow,
+                bool HugePages,
+                backend::time_requirements TimeRequirements>
+        struct channel_policy {
+            static constexpr auto runtime_mode = Mode;
+            static constexpr auto clock_type = Clock;
+            static constexpr auto overflow_policy = Overflow;
+            static constexpr bool huge_pages = HugePages;
+            static constexpr auto time_requirements = TimeRequirements;
+        };
+
+        template <basic_config_type Conf>
+        using channel_policy_for = channel_policy<
+                config_runtime_mode_v<Conf>,
+                config_clock_type_v<Conf>,
+                config_overflow_policy_v<Conf>,
+                Conf::use_huge_pages,
+                Conf::format_requirements>;
+
+        using default_channel_policy = channel_policy_for<config<>>;
+
+        struct channel_handle {
+            channel_id id{invalid_channel_id};
+            std::string_view name{};
+            size_t max_message_size{0};
+        };
+
+        template <typename Clock>
+        concept log_clock = requires {
+            typename Clock::time_point;
+            { Clock::now() } noexcept -> std::same_as<typename Clock::time_point>;
+            { Clock::is_steady } -> std::convertible_to<const bool&>;
+        };
+
+        template <log_clock Clock>
+        static constexpr uint64_t clock_now_ns() noexcept {
+            auto now = Clock::now().time_since_epoch();
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+        }
+
+        template <ClockType Type>
+        static constexpr uint64_t clock_now_ns_for() noexcept {
+            if constexpr (Type == ClockType::system) {
+                return clock_now_ns<std::chrono::system_clock>();
+            }
+
+            return clock_now_ns<std::chrono::steady_clock>();
+        }
 
         inline constexpr bool level_enabled(log_level message_level, log_level threshold) {
             if (threshold == log_level::off) {
@@ -39,8 +88,49 @@ namespace un::log {
             return static_cast<uint8_t>(message_level) >= static_cast<uint8_t>(threshold);
         }
 
-        backend::runtime_queue_producer& get_runtime_queue_producer(RuntimeMode runtime_mode);
-        void note_runtime_work_available(backend::runtime_queue_producer& producer, RuntimeMode runtime_mode) noexcept;
+        template <bool HugePages>
+        using runtime_queue_producer_t = backend::runtime_queue_producer<HugePages>;
+
+        runtime_queue_producer_t<false>& single_threaded_runtime_queue_producer_normal();
+        runtime_queue_producer_t<true>& single_threaded_runtime_queue_producer_huge();
+        runtime_queue_producer_t<false>& ensure_threadsafe_runtime_queue_producer_normal();
+        runtime_queue_producer_t<true>& ensure_threadsafe_runtime_queue_producer_huge();
+
+        template <typename Policy>
+        runtime_queue_producer_t<Policy::huge_pages>& get_runtime_queue_producer() {
+            if constexpr (Policy::runtime_mode == RuntimeMode::single_threaded) {
+                if constexpr (Policy::huge_pages) {
+                    return single_threaded_runtime_queue_producer_huge();
+                }
+                else {
+                    return single_threaded_runtime_queue_producer_normal();
+                }
+            }
+            else {
+                if constexpr (Policy::huge_pages) {
+                    return ensure_threadsafe_runtime_queue_producer_huge();
+                }
+                else {
+                    return ensure_threadsafe_runtime_queue_producer_normal();
+                }
+            }
+        }
+
+        void notify_runtime_work_available() noexcept;
+
+        template <typename Policy>
+        void note_runtime_work_available(runtime_queue_producer_t<Policy::huge_pages>& producer) noexcept {
+            if (!producer.try_mark_enqueued()) {
+                return;
+            }
+
+            if constexpr (Policy::runtime_mode == RuntimeMode::threadsafe) {
+                producer.publish_ready_bit();
+            }
+
+            notify_runtime_work_available();
+        }
+
         void mark_runtime_active_after_commit() noexcept;
 
         struct produce_record_outcome {
@@ -52,7 +142,7 @@ namespace un::log {
         template <typename... Arg>
         [[nodiscard]] produce_record_outcome produce_runtime_record(
                 backend::runtime_record_slot* slot,
-                backend::runtime_queue_producer& producer,
+                auto& producer,
                 channel_id channel,
                 log_level level,
                 uint64_t timestamp,
@@ -105,27 +195,22 @@ namespace un::log {
             }
         }
 
-        template <typename... Arg>
+        template <typename Policy, typename... Arg>
         void log_message(
                 channel_id channel,
-                RuntimeMode runtime_mode,
-                clock_now_fn_t clock_now_fn,
                 const char* channel_name,
                 size_t max_message_size,
-                bool overflow_drop,
-                bool can_truncate,
                 const source_loc& source_location,
                 log_level level,
                 fmt::format_string<Arg...> format,
                 Arg&&... args) {
-            if (!clock_now_fn || !channel_name) {
+            if (!channel_name) {
                 return;
             }
 
-            auto& producer = get_runtime_queue_producer(runtime_mode);
-            auto timestamp = clock_now_fn();
+            auto& producer = get_runtime_queue_producer<Policy>();
+            auto timestamp = clock_now_ns_for<Policy::clock_type>();
             auto sequence = producer.next_sequence();
-            auto payload_limit = can_truncate ? max_message_size : size_t{0};
             auto outcome = produce_record_outcome{};
             auto published = producer.queue().produce([&](backend::runtime_record_slot* slot) noexcept -> bool {
                 outcome = produce_runtime_record(
@@ -135,8 +220,8 @@ namespace un::log {
                         level,
                         timestamp,
                         sequence,
-                        payload_limit,
-                        overflow_drop,
+                        max_message_size,
+                        Policy::overflow_policy == OverflowPolicy::drop,
                         source_location,
                         format,
                         std::forward<Arg>(args)...);
@@ -161,23 +246,12 @@ namespace un::log {
             }
 #endif
 
-            note_runtime_work_available(producer, runtime_mode);
+            note_runtime_work_available<Policy>(producer);
             mark_runtime_active_after_commit();
         }
 
-        struct channel_runtime_view {
-            RuntimeMode runtime_mode{RuntimeMode::single_threaded};
-            clock_now_fn_t clock_now_fn{nullptr};
-            const char* channel_name{nullptr};
-            size_t max_message_size{0};
-            bool overflow_drop{true};
-            bool can_truncate{false};
-            log_level threshold{log_level::off};
-        };
-
         void set_channel_level(channel_id id, log_level level) noexcept;
         log_level channel_level(channel_id id) noexcept;
-        channel_runtime_view channel_runtime_view_for(channel_id id) noexcept;
 
         inline size_t resolve_channel_max_message_size(size_t max_record_size) {
             auto max_message_size = backend::max_message_size_for_runtime_record_limit(max_record_size);
@@ -202,7 +276,9 @@ namespace un::log {
             size_t max_message_size{0};
             bool overflow_drop{true};
             bool can_truncate{false};
+            RuntimeMode runtime_mode{RuntimeMode::single_threaded};
             ClockType timestamp_mode{ClockType::steady};
+            bool huge_pages{false};
             SinkType sink_type{SinkType::cout};
             std::string_view format;
             backend::time_requirements time_requirements{backend::time_requirements::none};
@@ -211,13 +287,15 @@ namespace un::log {
             std::optional<fs::path> unix_dgram_path{};
         };
 
-        channel make_channel_route(channel_registration registration, bool make_default);
+        channel_handle make_channel_route(channel_registration registration, bool make_default);
     }  // namespace detail
 
+    template <typename Policy = detail::default_channel_policy>
     class channel {
       public:
         constexpr channel() noexcept = default;
-        constexpr channel(channel_id id, std::string_view name) noexcept : id_{id}, name_{name} {}
+        constexpr channel(channel_id id, std::string_view name, size_t max_message_size) noexcept :
+                id_{id}, name_{name}, max_message_size_{max_message_size} {}
 
         constexpr explicit operator bool() const noexcept { return id_ != invalid_channel_id; }
 
@@ -231,28 +309,12 @@ namespace un::log {
                 return;
             }
 
-            auto view = detail::channel_runtime_view_for(id_);
-
-            if (!detail::level_enabled(level, view.threshold)) {
+            if (!detail::level_enabled(level, detail::channel_level(id_))) {
                 return;
             }
 
-            if (!view.clock_now_fn) {
-                return;
-            }
-
-            detail::log_message(
-                    id_,
-                    view.runtime_mode,
-                    view.clock_now_fn,
-                    view.channel_name,
-                    view.max_message_size,
-                    view.overflow_drop,
-                    view.can_truncate,
-                    source_location,
-                    level,
-                    format,
-                    std::forward<Arg>(args)...);
+            detail::log_message<Policy>(
+                    id_, name_.data(), max_message_size_, source_location, level, format, std::forward<Arg>(args)...);
         }
 
         void set_level(log_level level) const noexcept {
@@ -275,21 +337,23 @@ namespace un::log {
       private:
         channel_id id_{invalid_channel_id};
         std::string_view name_{};
+        size_t max_message_size_{0};
     };
 
     namespace detail {
 
         template <basic_config_type Conf>
-        channel make_channel(const Conf& conf, bool make_default) {
+        channel<channel_policy_for<Conf>> make_channel(const Conf& conf, bool make_default) {
             auto max_message_size = resolve_channel_max_message_size(static_cast<size_t>(Conf::max_record_size));
-
-            return make_channel_route(
+            auto handle = make_channel_route(
                     channel_registration{
                             .name = conf.name,
                             .max_message_size = max_message_size,
                             .overflow_drop = config_overflow_policy_v<Conf> == OverflowPolicy::drop,
                             .can_truncate = true,
+                            .runtime_mode = config_runtime_mode_v<Conf>,
                             .timestamp_mode = config_clock_type_v<Conf>,
+                            .huge_pages = Conf::use_huge_pages,
                             .sink_type = config_sink_type(conf),
                             .format = conf.format,
                             .time_requirements = config_format_requirements(conf),
@@ -298,6 +362,8 @@ namespace un::log {
                             .unix_dgram_path = config_unix_dgram_path(conf),
                     },
                     make_default);
+
+            return channel<channel_policy_for<Conf>>{handle.id, handle.name, max_message_size};
         }
 
         void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry);
@@ -325,6 +391,6 @@ namespace un::log {
 
     }  // namespace detail
 
-    channel global_channel();
+    channel<> global_channel();
 
 }  // namespace un::log

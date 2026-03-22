@@ -11,7 +11,7 @@
 #include <vector>
 
 #ifndef UNLOG_BENCH_THREAD_BUFSIZE_BYTES
-#define UNLOG_BENCH_THREAD_BUFSIZE_BYTES (1u << 22)
+#define UNLOG_BENCH_THREAD_BUFSIZE_BYTES (2u << 20)
 #endif
 
 namespace unlog_bench {
