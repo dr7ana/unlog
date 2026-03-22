@@ -16,7 +16,7 @@ bazel_dep(name = "fmt", version = "12.1.0")
 
 git_override(
     module_name = "utl",
-    commit = "de5bd7250df47e1d79628ecee60d43358816612a",
+    commit = "2e774773f6ad569a5c75754bf5e37c32b41bc9eb",
     init_submodules = True,
     remote = "https://github.com/dr7ana/utl",
 )
