@@ -221,7 +221,7 @@ def provider_benchmark(name, src, sink, deps = []):
         srcs = [src],
         copts = ["-std=c++23"],
         deps = [
-            "//bench:common",
+            "//:common",
             "@benchmark",
         ] + deps,
         linkopts = ["-pthread"],

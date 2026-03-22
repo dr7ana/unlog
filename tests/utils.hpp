@@ -28,7 +28,6 @@ namespace un::log::test {
                 std::string_view name = "unlog"sv,
                 SinkType sink_type = SinkType::cout,
                 uint8_t flags = Flags::color,
-                std::optional<std::string> format = std::nullopt,
                 std::optional<fs::path> filename = std::nullopt,
                 std::optional<int> output_fd = std::nullopt,
                 std::optional<fs::path> unix_dgram_path = std::nullopt) {
@@ -36,7 +35,6 @@ namespace un::log::test {
                     name,
                     sink_type,
                     flags,
-                    std::move(format),
                     std::move(filename),
                     std::move(output_fd),
                     std::move(unix_dgram_path),

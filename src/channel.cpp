@@ -99,6 +99,11 @@ namespace un::log {
             std::string target_key;
         };
 
+        struct consumer_sink_snapshot {
+            std::vector<backend::sink_entry> sinks;
+            backend::time_requirements time_requirements{backend::time_requirements::none};
+        };
+
         using runtime_queue_producer = backend::runtime_queue_producer;
 
         static constexpr size_t threadsafe_producer_capacity{16384};
@@ -134,7 +139,7 @@ namespace un::log {
             std::mutex runtime_mutex;
             std::vector<configured_sink> configured_sinks;
             std::vector<backend::sink_entry> custom_sinks;
-            std::shared_ptr<std::vector<backend::sink_entry>> consumer_sinks;
+            std::shared_ptr<consumer_sink_snapshot> consumer_sinks;
             std::condition_variable consumer_cv;
             std::thread consumer_thread;
             bool consumer_started{false};
@@ -152,6 +157,26 @@ namespace un::log {
             std::atomic<uint64_t> generation{0};
             bool process_exit_hook_registered{false};
         };
+
+        static std::shared_ptr<consumer_sink_snapshot> make_consumer_sink_snapshot(const runtime_state& runtime) {
+            auto snapshot = std::make_shared<consumer_sink_snapshot>();
+            snapshot->sinks.reserve(runtime.configured_sinks.size() + runtime.custom_sinks.size());
+
+            auto append = [&](const backend::sink_entry& entry) {
+                snapshot->time_requirements |= entry.requirements;
+                snapshot->sinks.push_back(entry);
+            };
+
+            for (const auto& sink : runtime.configured_sinks) {
+                append(sink.entry);
+            }
+
+            for (const auto& sink : runtime.custom_sinks) {
+                append(sink);
+            }
+
+            return snapshot;
+        }
 
         static runtime_control& access_control() {
             static runtime_control control;
@@ -393,17 +418,12 @@ namespace un::log {
                                                     registration.output_fd,
                                                     registration.unix_dgram_path),
                                             .pattern = std::string{registration.format},
+                                            .requirements = registration.time_requirements,
                                     },
                             .sink_type = registration.sink_type,
                             .target_key = std::move(key),
                     });
-            auto snapshot = std::make_shared<std::vector<backend::sink_entry>>();
-            snapshot->reserve(st.configured_sinks.size() + st.custom_sinks.size());
-            std::ranges::copy(
-                    st.configured_sinks | std::views::transform([](const auto& sink) { return sink.entry; }),
-                    std::back_inserter(*snapshot));
-            std::ranges::copy(st.custom_sinks, std::back_inserter(*snapshot));
-            st.consumer_sinks = std::move(snapshot);
+            st.consumer_sinks = make_consumer_sink_snapshot(st);
         }
 
         static uint64_t current_thread_id() {
@@ -567,26 +587,44 @@ namespace un::log {
         auto runtime_startup_system_ns =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(runtime_startup_system_time.time_since_epoch());
 
+        template <bool NeedsWallClock, bool NeedsElapsed>
         static backend::time_context resolve_runtime_time_context(uint64_t timestamp, ClockType clock_type) {
-            auto sample_system = std::chrono::system_clock::time_point{};
-            auto elapsed = std::chrono::nanoseconds{0};
+            auto context = backend::time_context{};
+
+            if constexpr (!(NeedsWallClock || NeedsElapsed)) {
+                return context;
+            }
 
             if (clock_type == ClockType::system) {
                 auto system_ticks = backend::ticks_to_ns(timestamp);
-                sample_system = std::chrono::system_clock::time_point{system_ticks};
-                elapsed = system_ticks - runtime_startup_system_ns;
-            }
-            else {
-                auto steady_ticks = backend::ticks_to_ns(timestamp);
-                elapsed = steady_ticks - runtime_startup_steady_ns;
-                sample_system = runtime_startup_system_time + elapsed;
+
+                if constexpr (NeedsWallClock) {
+                    auto sample_system = std::chrono::system_clock::time_point{system_ticks};
+                    context.tm = backend::local_time(sample_system);
+                    context.millis = backend::millis_part(sample_system);
+                }
+
+                if constexpr (NeedsElapsed) {
+                    context.elapsed = backend::format_elapsed(system_ticks - runtime_startup_system_ns);
+                }
+
+                return context;
             }
 
-            return backend::time_context{
-                    .tm = backend::local_time(sample_system),
-                    .millis = backend::millis_part(sample_system),
-                    .elapsed = backend::format_elapsed(elapsed),
-            };
+            auto steady_ticks = backend::ticks_to_ns(timestamp);
+            auto elapsed = steady_ticks - runtime_startup_steady_ns;
+
+            if constexpr (NeedsWallClock) {
+                auto sample_system = runtime_startup_system_time + elapsed;
+                context.tm = backend::local_time(sample_system);
+                context.millis = backend::millis_part(sample_system);
+            }
+
+            if constexpr (NeedsElapsed) {
+                context.elapsed = backend::format_elapsed(elapsed);
+            }
+
+            return context;
         }
 
         static backend::log_entry make_runtime_log_entry(
@@ -611,16 +649,10 @@ namespace un::log {
         };
 
         static void rebuild_consumer_sinks_locked(runtime_state& runtime) {
-            auto snapshot = std::make_shared<std::vector<backend::sink_entry>>();
-            snapshot->reserve(runtime.configured_sinks.size() + runtime.custom_sinks.size());
-            std::ranges::copy(
-                    runtime.configured_sinks | std::views::transform([](const auto& sink) { return sink.entry; }),
-                    std::back_inserter(*snapshot));
-            std::ranges::copy(runtime.custom_sinks, std::back_inserter(*snapshot));
-            runtime.consumer_sinks = std::move(snapshot);
+            runtime.consumer_sinks = make_consumer_sink_snapshot(runtime);
         }
 
-        static std::shared_ptr<const std::vector<backend::sink_entry>> sink_snapshot(runtime_state& runtime) {
+        static std::shared_ptr<const consumer_sink_snapshot> sink_snapshot(runtime_state& runtime) {
             std::lock_guard lock{runtime.runtime_mutex};
             if (!runtime.consumer_sinks) {
                 rebuild_consumer_sinks_locked(runtime);
@@ -629,20 +661,22 @@ namespace un::log {
             return runtime.consumer_sinks;
         }
 
-        static void emit_runtime_slot(
+        template <bool NeedsWallClock, bool NeedsElapsed>
+        static void emit_runtime_slot_for(
                 runtime_state& runtime,
-                const std::vector<backend::sink_entry>& sinks,
+                const consumer_sink_snapshot& sinks,
                 consumer_scratch& scratch,
                 const backend::runtime_record_slot& slot) {
             auto rec = make_runtime_log_entry(runtime, slot);
-            auto time_context = resolve_runtime_time_context(rec.timestamp, runtime.clock_type);
+            auto time_context =
+                    resolve_runtime_time_context<NeedsWallClock, NeedsElapsed>(rec.timestamp, runtime.clock_type);
             auto& line_cache = scratch.line_cache;
             line_cache.clear();
-            if (line_cache.capacity() < sinks.size()) {
-                line_cache.reserve(sinks.size());
+            if (line_cache.capacity() < sinks.sinks.size()) {
+                line_cache.reserve(sinks.sinks.size());
             }
 
-            for (const auto& sink : sinks) {
+            for (const auto& sink : sinks.sinks) {
                 auto line = backend::format_cache_line(
                         line_cache,
                         sink.pattern,
@@ -655,9 +689,30 @@ namespace un::log {
             }
         }
 
+        static void emit_runtime_slot(
+                runtime_state& runtime,
+                const consumer_sink_snapshot& sinks,
+                consumer_scratch& scratch,
+                const backend::runtime_record_slot& slot) {
+            switch (sinks.time_requirements) {
+                case backend::time_requirements::none:
+                    emit_runtime_slot_for<false, false>(runtime, sinks, scratch, slot);
+                    return;
+                case backend::time_requirements::wall_clock:
+                    emit_runtime_slot_for<true, false>(runtime, sinks, scratch, slot);
+                    return;
+                case backend::time_requirements::elapsed:
+                    emit_runtime_slot_for<false, true>(runtime, sinks, scratch, slot);
+                    return;
+                case backend::time_requirements::wall_clock_elapsed:
+                    emit_runtime_slot_for<true, true>(runtime, sinks, scratch, slot);
+                    return;
+            }
+        }
+
         static size_t drain_runtime_queue_producer(
                 runtime_state& runtime,
-                const std::vector<backend::sink_entry>& sinks,
+                const consumer_sink_snapshot& sinks,
                 consumer_scratch& scratch,
                 runtime_queue_producer& producer) {
             auto drained_total = size_t{0};
@@ -733,7 +788,7 @@ namespace un::log {
 
         static void flush_runtime_sinks(runtime_state& runtime) {
             auto sinks = sink_snapshot(runtime);
-            for (const auto& sink : *sinks) {
+            for (const auto& sink : sinks->sinks) {
                 sink.sink->flush();
             }
         }
@@ -872,6 +927,7 @@ namespace un::log {
                             .timestamp_mode = detail::config_clock_type_v<decltype(conf)>,
                             .sink_type = detail::config_sink_type(conf),
                             .format = conf.format,
+                            .time_requirements = detail::config_format_requirements(conf),
                             .filename = detail::config_filename(conf),
                             .output_fd = detail::config_output_fd(conf),
                             .unix_dgram_path = detail::config_unix_dgram_path(conf),
@@ -909,7 +965,7 @@ namespace un::log {
             return make_channel_route_locked(st, std::move(registration), make_default, false);
         }
 
-        void add_sink_route(sink_ptr sink, ClockType timestamp_mode, std::string_view format) {
+        void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
@@ -918,7 +974,7 @@ namespace un::log {
             if (st.is_active.load(std::memory_order_relaxed)) {
                 throw std::invalid_argument{"runtime is active; cannot add sinks"};
             }
-            if (!sink) {
+            if (!entry.sink) {
                 throw std::invalid_argument{"add_sink requires a non-null sink"};
             }
 
@@ -926,11 +982,7 @@ namespace un::log {
             set_runtime_clock_type(st, timestamp_mode);
 
             std::lock_guard runtime_lock{st.runtime_mutex};
-            st.custom_sinks.push_back(
-                    backend::sink_entry{
-                            .sink = std::move(sink),
-                            .pattern = std::string{format},
-                    });
+            st.custom_sinks.push_back(std::move(entry));
             rebuild_consumer_sinks_locked(st);
         }
 

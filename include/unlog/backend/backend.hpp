@@ -42,6 +42,7 @@ namespace un::log::backend {
     struct sink_entry {
         sink_ptr sink;
         std::string pattern;
+        backend::time_requirements requirements{backend::time_requirements::none};
     };
 
     template <typename T>

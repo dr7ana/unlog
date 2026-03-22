@@ -205,6 +205,7 @@ namespace un::log {
             ClockType timestamp_mode{ClockType::steady};
             SinkType sink_type{SinkType::cout};
             std::string_view format;
+            backend::time_requirements time_requirements{backend::time_requirements::none};
             std::optional<fs::path> filename{};
             std::optional<int> output_fd{};
             std::optional<fs::path> unix_dgram_path{};
@@ -291,6 +292,7 @@ namespace un::log {
                             .timestamp_mode = config_clock_type_v<Conf>,
                             .sink_type = config_sink_type(conf),
                             .format = conf.format,
+                            .time_requirements = config_format_requirements(conf),
                             .filename = config_filename(conf),
                             .output_fd = config_output_fd(conf),
                             .unix_dgram_path = config_unix_dgram_path(conf),
@@ -298,11 +300,17 @@ namespace un::log {
                     make_default);
         }
 
-        void add_sink_route(sink_ptr sink, ClockType timestamp_mode, std::string_view format);
+        void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry);
 
         template <basic_config_type Conf>
         inline void add_sink(const Conf& conf, sink_ptr sink) {
-            add_sink_route(std::move(sink), config_clock_type_v<Conf>, conf.format);
+            add_sink_route(
+                    config_clock_type_v<Conf>,
+                    backend::sink_entry{
+                            .sink = std::move(sink),
+                            .pattern = std::string{conf.format},
+                            .requirements = config_format_requirements(conf),
+                    });
         }
 
         void flush_backend();

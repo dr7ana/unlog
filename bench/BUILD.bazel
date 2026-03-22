@@ -1,5 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//bench:defs.bzl", "benchmark_suite", "provider_benchmark")
+load("//:defs.bzl", "benchmark_suite", "provider_benchmark")
 
 cc_library(
     name = "common",
@@ -21,21 +21,21 @@ provider_benchmark(
     name = "unlog_file",
     src = "src/unlog.cpp",
     sink = "file",
-    deps = ["//:libunlog"],
+    deps = ["@unlog//:libunlog"],
 )
 
 provider_benchmark(
     name = "unlog_stdout",
     src = "src/unlog.cpp",
     sink = "stdout",
-    deps = ["//:libunlog"],
+    deps = ["@unlog//:libunlog"],
 )
 
 provider_benchmark(
     name = "unlog_fd",
     src = "src/unlog.cpp",
     sink = "fd",
-    deps = ["//:libunlog"],
+    deps = ["@unlog//:libunlog"],
 )
 
 provider_benchmark(

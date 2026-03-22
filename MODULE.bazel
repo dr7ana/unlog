@@ -4,7 +4,6 @@ module(
 )
 
 bazel_dep(name = "rules_cc", version = "0.2.13")
-bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "fmt", version = "12.1.0")
 bazel_dep(name = "catch2", version = "3.11.0")
@@ -21,51 +20,4 @@ git_override(
     module_name = "allocazam",
     commit = "61139e2b46c744330ad862b2c019ac804ea6a331",
     remote = "https://github.com/dr7ana/allocazam",
-)
-
-http_archive = use_repo_rule(
-    "@bazel_tools//tools/build_defs/repo:http.bzl",
-    "http_archive",
-)
-
-python = use_extension("@rules_python//python/extensions:python.bzl", "python")
-python.toolchain(
-    is_default = True,
-    python_version = "3.13",
-)
-use_repo(python, "python_3_13")
-
-pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
-pip.parse(
-    hub_name = "pypi",
-    python_version = "3.13",
-    requirements_lock = "//bench/plot:requirements_lock.txt",
-)
-use_repo(pip, "pypi")
-
-http_archive(
-    name = "benchmark",
-    strip_prefix = "benchmark-1.9.4",
-    urls = ["https://github.com/google/benchmark/archive/refs/tags/v1.9.4.tar.gz"],
-)
-
-http_archive(
-    name = "spdlog",
-    build_file = "//bench:spdlog.BUILD.bazel",
-    strip_prefix = "spdlog-1.17.0",
-    urls = ["https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz"],
-)
-
-http_archive(
-    name = "quill",
-    build_file = "//bench:quill.BUILD.bazel",
-    strip_prefix = "quill-10.2.0",
-    urls = ["https://github.com/odygrd/quill/archive/refs/tags/v10.2.0.tar.gz"],
-)
-
-http_archive(
-    name = "fmtlog",
-    build_file = "//bench:fmtlog.BUILD.bazel",
-    strip_prefix = "fmtlog-2.3.0",
-    urls = ["https://github.com/MengRao/fmtlog/archive/refs/tags/v2.3.0.tar.gz"],
 )

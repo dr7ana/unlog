@@ -53,9 +53,9 @@ namespace un::log::test {
         REQUIRE_CONTAINS("runtime path ready");
     }
 
-    TEST_CASE("002 - formatting honors custom pattern with elapsed flag", "[002][settings][format]") {
+    TEST_CASE("002 - formatting honors compile-time custom pattern with elapsed flag", "[002][settings][format]") {
         runtime_state_guard guard;
-        auto conf = test_helper::make_config("custom", SinkType::cout, Flags::color, "[%*] %v");
+        auto conf = config<options::pattern<"[%*] %v">>::make("custom");
 
         make_channel(conf, true);
 
