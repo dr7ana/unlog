@@ -12,14 +12,16 @@ namespace un::log::backend {
         return std::chrono::nanoseconds{static_cast<std::chrono::nanoseconds::rep>(clamped)};
     }
 
-    constexpr std::tm local_time(const std::chrono::system_clock::time_point& now) {
+    template <typename DurationT>
+    constexpr std::tm local_time(const std::chrono::time_point<std::chrono::system_clock, DurationT>& now) {
         auto tt = std::chrono::system_clock::to_time_t(now);
         std::tm tm{};
         localtime_r(&tt, &tm);
         return tm;
     }
 
-    constexpr size_t millis_part(std::chrono::system_clock::time_point timestamp) {
+    template <typename DurationT>
+    constexpr size_t millis_part(std::chrono::time_point<std::chrono::system_clock, DurationT> timestamp) {
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp.time_since_epoch()).count();
         auto normalized = ((ms % 1000) + 1000) % 1000;
         return static_cast<size_t>(normalized);

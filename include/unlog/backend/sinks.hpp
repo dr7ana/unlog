@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <ostream>
 #include <stdexcept>
 #include <string>

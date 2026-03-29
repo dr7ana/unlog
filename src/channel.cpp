@@ -632,7 +632,9 @@ namespace un::log {
                 auto system_ticks = backend::ticks_to_ns(timestamp);
 
                 if constexpr (NeedsWallClock) {
-                    auto sample_system = std::chrono::system_clock::time_point{system_ticks};
+                    std::chrono::system_clock::time_point sample_system{
+                            std::chrono::duration_cast<std::chrono::system_clock::duration>(system_ticks)};
+
                     context.tm = backend::local_time(sample_system);
                     context.millis = backend::millis_part(sample_system);
                 }
@@ -645,10 +647,11 @@ namespace un::log {
             }
 
             auto steady_ticks = backend::ticks_to_ns(timestamp);
-            auto elapsed = steady_ticks - runtime_startup_steady_ns;
+            auto elapsed = std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                    steady_ticks - runtime_startup_steady_ns);
 
             if constexpr (NeedsWallClock) {
-                auto sample_system = runtime_startup_system_time + elapsed;
+                std::chrono::system_clock::time_point sample_system = runtime_startup_system_time + elapsed;
                 context.tm = backend::local_time(sample_system);
                 context.millis = backend::millis_part(sample_system);
             }
