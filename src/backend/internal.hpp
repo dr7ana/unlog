@@ -6,6 +6,29 @@
 namespace un::log::backend {
     //
 
+    inline constexpr std::string_view ansi_reset{"\x1b[0m"};
+
+    inline constexpr std::string_view color_for_level(log_level level) noexcept {
+        switch (level) {
+            case log_level::trace:
+                return "\x1b[90m";
+            case log_level::debug:
+                return "\x1b[36m";
+            case log_level::info:
+                return "\x1b[32m";
+            case log_level::warn:
+                return "\x1b[33m";
+            case log_level::err:
+                return "\x1b[31m";
+            case log_level::critical:
+                return "\x1b[1;31m";
+            case log_level::off:
+                return "\x1b[2m";
+            default:
+                [[unlikely]] return std::string_view{};
+        }
+    }
+
     constexpr std::chrono::nanoseconds ticks_to_ns(uint64_t ticks) noexcept {
         auto max_ticks = static_cast<uint64_t>(std::numeric_limits<std::chrono::nanoseconds::rep>::max());
         auto clamped = ticks > max_ticks ? max_ticks : ticks;
@@ -54,6 +77,7 @@ namespace un::log::backend {
 
     inline std::string render_pattern(
             std::string_view pattern,
+            bool color,
             const log_entry& rec,
             const std::tm& tm,
             size_t millis,
@@ -110,7 +134,12 @@ namespace un::log::backend {
                     "{}"_format_to(out, rec.message);
                     break;
                 case '^':
+                    if (color)
+                        "{}"_format_to(out, color_for_level(rec.level));
+                    break;
                 case '$':
+                    if (color)
+                        "{}"_format_to(out, ansi_reset);
                     break;
                 default:
                     out.push_back('%');
@@ -124,35 +153,38 @@ namespace un::log::backend {
 
     struct line_cache_entry {
         std::string_view pattern;
+        bool color{false};
         bool with_newline{false};
         std::string line;
     };
 
     inline constexpr bool same_cache_key(
-            const line_cache_entry& entry, std::string_view pattern, bool with_newline) noexcept {
-        return entry.with_newline == with_newline && entry.pattern == pattern;
+            const line_cache_entry& entry, std::string_view pattern, bool color, bool with_newline) noexcept {
+        return entry.color == color && entry.with_newline == with_newline && entry.pattern == pattern;
     }
 
     inline constexpr std::string_view format_cache_line(
             std::vector<line_cache_entry>& line_cache,
             std::string_view pattern,
+            bool color,
             bool with_newline,
             const log_entry& rec,
             const std::tm& tm,
             size_t millis,
             std::string_view elapsed) {
         for (auto& entry : line_cache) {
-            if (same_cache_key(entry, pattern, with_newline))
+            if (same_cache_key(entry, pattern, color, with_newline))
                 return entry.line;
         }
 
-        auto line = render_pattern(pattern, rec, tm, millis, elapsed);
+        auto line = render_pattern(pattern, color, rec, tm, millis, elapsed);
         if (with_newline)
             line.push_back('\n');
 
         line_cache.push_back(
                 line_cache_entry{
                         .pattern = pattern,
+                        .color = color,
                         .with_newline = with_newline,
                         .line = std::move(line),
                 });

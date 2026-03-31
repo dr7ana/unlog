@@ -386,6 +386,7 @@ namespace un::log {
                                                     registration.output_fd,
                                                     registration.unix_dgram_path),
                                             .pattern = std::string{registration.format},
+                                            .color = registration.color,
                                             .requirements = registration.time_requirements,
                                     },
                             .sink_type = registration.sink_type,
@@ -716,6 +717,7 @@ namespace un::log {
                 auto line = backend::format_cache_line(
                         line_cache,
                         sink.pattern,
+                        sink.color,
                         true,
                         rec,
                         time_context.tm,
@@ -984,6 +986,7 @@ namespace un::log {
                             .huge_pages = decltype(conf)::use_huge_pages,
                             .sink_type = detail::config_sink_type(conf),
                             .format = conf.format,
+                            .color = conf.color(),
                             .time_requirements = detail::config_format_requirements(conf),
                             .filename = detail::config_filename(conf),
                             .output_fd = detail::config_output_fd(conf),

@@ -281,6 +281,7 @@ namespace un::log {
             bool huge_pages{false};
             SinkType sink_type{SinkType::cout};
             std::string_view format;
+            bool color{false};
             backend::time_requirements time_requirements{backend::time_requirements::none};
             std::optional<fs::path> filename{};
             std::optional<int> output_fd{};
@@ -356,6 +357,7 @@ namespace un::log {
                             .huge_pages = Conf::use_huge_pages,
                             .sink_type = config_sink_type(conf),
                             .format = conf.format,
+                            .color = conf.color(),
                             .time_requirements = config_format_requirements(conf),
                             .filename = config_filename(conf),
                             .output_fd = config_output_fd(conf),
@@ -375,6 +377,7 @@ namespace un::log {
                     backend::sink_entry{
                             .sink = std::move(sink),
                             .pattern = std::string{conf.format},
+                            .color = conf.color(),
                             .requirements = config_format_requirements(conf),
                     });
         }
