@@ -5,7 +5,7 @@
 namespace un::log {
     namespace detail {
         template <typename Policy, typename... Arg>
-        inline void log_handle(
+        constexpr void log_handle(
                 const channel<Policy>& route,
                 log_level level,
                 const std::source_location& source_location,
@@ -14,14 +14,6 @@ namespace un::log {
             route.log(sloc(source_location), level, fmt, std::forward<Arg>(args)...);
         }
 
-        template <typename... Arg>
-        inline void log_default(
-                log_level level,
-                const std::source_location& source_location,
-                fmt::format_string<Arg...> fmt,
-                Arg&&... args) {
-            global_channel().log(sloc(source_location), level, fmt, std::forward<Arg>(args)...);
-        }
     }  // namespace detail
 
     // Objects operating as functions, utilizing CTAD to statically initialize templates for all possible arguments at
@@ -30,51 +22,36 @@ namespace un::log {
     template <typename... Arg>
     struct trace {
         template <typename Policy>
-        trace(const channel<Policy>& route,
-              fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
+        constexpr trace(
+                const channel<Policy>& route,
+                fmt::format_string<Arg...> fmt,
+                Arg&&... args,
+                const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::trace, source_location, fmt, std::forward<Arg>(args)...);
-        }
-
-        trace(fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::trace, source_location, fmt, std::forward<Arg>(args)...);
         }
     };
 
     template <typename... Arg>
     struct debug {
         template <typename Policy>
-        debug(const channel<Policy>& route,
-              fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
+        constexpr debug(
+                const channel<Policy>& route,
+                fmt::format_string<Arg...> fmt,
+                Arg&&... args,
+                const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::debug, source_location, fmt, std::forward<Arg>(args)...);
-        }
-
-        debug(fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::debug, source_location, fmt, std::forward<Arg>(args)...);
         }
     };
 
     template <typename... Arg>
     struct info {
         template <typename Policy>
-        info(const channel<Policy>& route,
-             fmt::format_string<Arg...> fmt,
-             Arg&&... args,
-             const std::source_location& source_location = std::source_location::current()) {
+        constexpr info(
+                const channel<Policy>& route,
+                fmt::format_string<Arg...> fmt,
+                Arg&&... args,
+                const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::info, source_location, fmt, std::forward<Arg>(args)...);
-        }
-
-        info(fmt::format_string<Arg...> fmt,
-             Arg&&... args,
-             const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::info, source_location, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -86,12 +63,6 @@ namespace un::log {
              Arg&&... args,
              const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::warn, source_location, fmt, std::forward<Arg>(args)...);
-        }
-
-        warn(fmt::format_string<Arg...> fmt,
-             Arg&&... args,
-             const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::warn, source_location, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -105,29 +76,17 @@ namespace un::log {
                 const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::critical, source_location, fmt, std::forward<Arg>(args)...);
         }
-
-        critical(
-                fmt::format_string<Arg...> fmt,
-                Arg&&... args,
-                const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::critical, source_location, fmt, std::forward<Arg>(args)...);
-        }
     };
 
     template <typename... Arg>
     struct error {
         template <typename Policy>
-        error(const channel<Policy>& route,
-              fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
+        constexpr error(
+                const channel<Policy>& route,
+                fmt::format_string<Arg...> fmt,
+                Arg&&... args,
+                const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, log_level::err, source_location, fmt, std::forward<Arg>(args)...);
-        }
-
-        error(fmt::format_string<Arg...> fmt,
-              Arg&&... args,
-              const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(log_level::err, source_location, fmt, std::forward<Arg>(args)...);
         }
     };
 
@@ -141,59 +100,33 @@ namespace un::log {
             const std::source_location& source_location = std::source_location::current()) {
             detail::log_handle(route, level, source_location, fmt, std::forward<Arg>(args)...);
         }
-
-        log(fmt::format_string<Arg...> fmt,
-            log_level level,
-            Arg&&... args,
-            const std::source_location& source_location = std::source_location::current()) {
-            detail::log_default(level, source_location, fmt, std::forward<Arg>(args)...);
-        }
     };
 
     // Template deduction guides
     template <typename Policy, typename... Arg>
     trace(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> trace<Arg...>;
-    template <typename... Arg>
-    trace(fmt::format_string<Arg...>, Arg&&...) -> trace<Arg...>;
-
     template <typename Policy, typename... Arg>
     debug(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> debug<Arg...>;
-    template <typename... Arg>
-    debug(fmt::format_string<Arg...>, Arg&&...) -> debug<Arg...>;
 
     template <typename Policy, typename... Arg>
     info(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> info<Arg...>;
-    template <typename... Arg>
-    info(fmt::format_string<Arg...>, Arg&&...) -> info<Arg...>;
 
     template <typename Policy, typename... Arg>
     warn(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> warn<Arg...>;
-    template <typename... Arg>
-    warn(fmt::format_string<Arg...>, Arg&&...) -> warn<Arg...>;
 
     template <typename Policy, typename... Arg>
     error(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> error<Arg...>;
-    template <typename... Arg>
-    error(fmt::format_string<Arg...>, Arg&&...) -> error<Arg...>;
 
     template <typename Policy, typename... Arg>
     critical(const channel<Policy>&, fmt::format_string<Arg...>, Arg&&...) -> critical<Arg...>;
-    template <typename... Arg>
-    critical(fmt::format_string<Arg...>, Arg&&...) -> critical<Arg...>;
 
     template <typename Policy, typename... Arg>
     log(const channel<Policy>&, log_level, fmt::format_string<Arg...>, Arg&&...) -> log<Arg...>;
-    template <typename... Arg>
-    log(fmt::format_string<Arg...>, log_level, Arg&&...) -> log<Arg...>;
 
     // Exposed API functions
     template <detail::basic_config_type Conf>
-    inline auto make_channel(const Conf& conf, bool make_default = false) {
-        return detail::make_channel(conf, make_default);
-    }
-
-    inline channel<> make_channel(std::string_view name, bool make_default = false) {
-        return detail::make_channel(config<>::make(name), make_default);
+    inline constexpr auto make_channel(const Conf& conf) {
+        return detail::make_channel(conf);
     }
 
     void set_global_config(global_config cfg);
@@ -202,12 +135,12 @@ namespace un::log {
 
     void prewarm_thread();
 
-    inline void set_default_level(log_level level = log_level::info) {
-        return detail::set_default_level(level);
+    inline void set_current_level(log_level level = log_level::info) {
+        return detail::set_current_level(level);
     }
 
-    inline log_level get_default_level() {
-        return detail::get_default_level();
+    inline log_level get_current_level() {
+        return detail::get_current_level();
     }
 
     void flush();

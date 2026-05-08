@@ -39,6 +39,22 @@ namespace un::log {
             static constexpr auto time_requirements = TimeRequirements;
         };
 
+    }  // namespace detail
+
+    template <typename T, typename U = std::remove_cvref_t<T>>
+    concept channel_policy_type = requires {
+        { U::runtime_mode } -> std::convertible_to<RuntimeMode>;
+        { U::clock_type } -> std::convertible_to<ClockType>;
+        { U::overflow_policy } -> std::convertible_to<OverflowPolicy>;
+        { U::huge_pages } -> std::convertible_to<bool>;
+        { U::time_requirements } -> std::convertible_to<backend::time_requirements>;
+    };
+
+    template <channel_policy_type Policy>
+    class channel;
+
+    namespace detail {
+
         template <basic_config_type Conf>
         using channel_policy_for = channel_policy<
                 config_runtime_mode_v<Conf>,
@@ -48,6 +64,9 @@ namespace un::log {
                 Conf::format_requirements>;
 
         using default_channel_policy = channel_policy_for<config<>>;
+
+        template <basic_config_type Conf>
+        constexpr channel<channel_policy_for<Conf>> make_channel(const Conf& conf);
 
         struct channel_handle {
             channel_id id{invalid_channel_id};
@@ -63,13 +82,13 @@ namespace un::log {
         };
 
         template <log_clock Clock>
-        static constexpr uint64_t clock_now_ns() noexcept {
+        inline constexpr uint64_t clock_now_ns() noexcept {
             auto now = Clock::now().time_since_epoch();
             return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
         }
 
         template <ClockType Type>
-        static constexpr uint64_t clock_now_ns_for() noexcept {
+        inline constexpr uint64_t clock_now_ns_for() noexcept {
             if constexpr (Type == ClockType::system) {
                 return clock_now_ns<std::chrono::system_clock>();
             }
@@ -96,7 +115,7 @@ namespace un::log {
         runtime_queue_producer_t<false>& ensure_threadsafe_runtime_queue_producer_normal();
         runtime_queue_producer_t<true>& ensure_threadsafe_runtime_queue_producer_huge();
 
-        template <typename Policy>
+        template <un::log::channel_policy_type Policy>
         runtime_queue_producer_t<Policy::huge_pages>& get_runtime_queue_producer() {
             if constexpr (Policy::runtime_mode == RuntimeMode::single_threaded) {
                 if constexpr (Policy::huge_pages) {
@@ -118,7 +137,7 @@ namespace un::log {
 
         void notify_runtime_work_available() noexcept;
 
-        template <typename Policy>
+        template <un::log::channel_policy_type Policy>
         void note_runtime_work_available(runtime_queue_producer_t<Policy::huge_pages>& producer) noexcept {
             if (!producer.try_mark_enqueued()) {
                 return;
@@ -140,7 +159,7 @@ namespace un::log {
         };
 
         template <typename... Arg>
-        [[nodiscard]] produce_record_outcome produce_runtime_record(
+        [[nodiscard]] constexpr produce_record_outcome produce_runtime_record(
                 backend::runtime_record_slot* slot,
                 auto& producer,
                 channel_id channel,
@@ -195,8 +214,8 @@ namespace un::log {
             }
         }
 
-        template <typename Policy, typename... Arg>
-        void log_message(
+        template <un::log::channel_policy_type Policy, typename... Arg>
+        constexpr void log_message(
                 channel_id channel,
                 const char* channel_name,
                 size_t max_message_size,
@@ -253,7 +272,7 @@ namespace un::log {
         void set_channel_level(channel_id id, log_level level) noexcept;
         log_level channel_level(channel_id id) noexcept;
 
-        inline size_t resolve_channel_max_message_size(size_t max_record_size) {
+        inline constexpr size_t resolve_channel_max_message_size(size_t max_record_size) {
             auto max_message_size = backend::max_message_size_for_runtime_record_limit(max_record_size);
             if (max_message_size.has_value()) {
                 return *max_message_size;
@@ -288,20 +307,20 @@ namespace un::log {
             std::optional<fs::path> unix_dgram_path{};
         };
 
-        channel_handle make_channel_route(channel_registration registration, bool make_default);
+        channel_handle make_channel_route(channel_registration registration);
     }  // namespace detail
 
-    template <typename Policy = detail::default_channel_policy>
+    template <channel_policy_type Policy>
     class channel {
       public:
-        constexpr channel() noexcept = default;
-        constexpr channel(channel_id id, std::string_view name, size_t max_message_size) noexcept :
-                id_{id}, name_{name}, max_message_size_{max_message_size} {}
+        using policy_type = Policy;
+
+        channel() = delete;
 
         constexpr explicit operator bool() const noexcept { return id_ != invalid_channel_id; }
 
         template <typename... Arg>
-        void log(
+        constexpr void log(
                 const detail::source_loc& source_location,
                 log_level level,
                 fmt::format_string<Arg...> format,
@@ -318,13 +337,13 @@ namespace un::log {
                     id_, name_.data(), max_message_size_, source_location, level, format, std::forward<Arg>(args)...);
         }
 
-        void set_level(log_level level) const noexcept {
+        constexpr void set_level(log_level level) const noexcept {
             if (*this) {
                 detail::set_channel_level(id_, level);
             }
         }
 
-        [[nodiscard]] log_level level() const noexcept {
+        [[nodiscard]] constexpr log_level level() const noexcept {
             if (!*this) {
                 return log_level::off;
             }
@@ -336,15 +355,30 @@ namespace un::log {
         [[nodiscard]] constexpr channel_id id() const noexcept { return id_; }
 
       private:
+        template <detail::basic_config_type Conf>
+        constexpr friend channel<detail::channel_policy_for<Conf>> detail::make_channel(const Conf& conf);
+
+        constexpr channel(channel_id id, std::string_view name, size_t max_message_size) noexcept :
+                id_{id}, name_{name}, max_message_size_{max_message_size} {}
+
         channel_id id_{invalid_channel_id};
         std::string_view name_{};
         size_t max_message_size_{0};
     };
 
+    template <typename T, typename U = std::remove_cvref_t<T>>
+    concept channel_type = requires { typename U::policy_type; } && channel_policy_type<typename U::policy_type> &&
+                           std::same_as<U, channel<typename U::policy_type>>;
+
+    using default_channel = channel<detail::default_channel_policy>;
+
+    static_assert(channel_policy_type<detail::default_channel_policy>);
+    static_assert(channel_type<default_channel>);
+
     namespace detail {
 
         template <basic_config_type Conf>
-        channel<channel_policy_for<Conf>> make_channel(const Conf& conf, bool make_default) {
+        constexpr channel<channel_policy_for<Conf>> make_channel(const Conf& conf) {
             auto max_message_size = resolve_channel_max_message_size(static_cast<size_t>(Conf::max_record_size));
             auto handle = make_channel_route(
                     channel_registration{
@@ -362,8 +396,7 @@ namespace un::log {
                             .filename = config_filename(conf),
                             .output_fd = config_output_fd(conf),
                             .unix_dgram_path = config_unix_dgram_path(conf),
-                    },
-                    make_default);
+                    });
 
             return channel<channel_policy_for<Conf>>{handle.id, handle.name, max_message_size};
         }
@@ -388,12 +421,10 @@ namespace un::log {
         backend::producer_stats backend_stats();
 #endif
 
-        log_level get_default_level();
+        log_level get_current_level();
 
-        void set_default_level(log_level level);
+        void set_current_level(log_level level);
 
     }  // namespace detail
-
-    channel<> global_channel();
 
 }  // namespace un::log

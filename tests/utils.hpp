@@ -75,17 +75,17 @@ namespace un::log::test {
             stream.clear();
         }
 
-        static auto capture_test_logs(log_level level = get_default_level()) {
+        static auto capture_test_logs(log_level level = get_current_level()) {
             reset();
-            set_default_level(level);
+            set_current_level(level);
             auto conf = config<>::make("capture");
             detail::add_sink(conf, std::make_shared<capture_sink>());
         }
 
         template <detail::basic_config_type Conf>
-        static auto capture_test_logs(const Conf& conf, log_level level = get_default_level()) {
+        static auto capture_test_logs(const Conf& conf, log_level level = get_current_level()) {
             reset();
-            set_default_level(level);
+            set_current_level(level);
             detail::add_sink(conf, std::make_shared<capture_sink>());
         }
 

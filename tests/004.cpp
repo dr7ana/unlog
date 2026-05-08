@@ -4,14 +4,14 @@
 
 namespace un::log::test {
 
-    TEST_CASE("004 - default channel path emits through runtime queue", "[004][runtime][channel]") {
+    TEST_CASE("004 - explicit channel path emits through runtime queue", "[004][runtime][channel]") {
         runtime_state_guard guard;
 
         auto cfg = config<>::make("hotpotato");
-        make_channel(cfg, true);
+        auto route = make_channel(cfg);
         util::capture_test_logs(cfg);
 
-        unlog::info("runtime-message");
+        unlog::info(route, "runtime-message");
 
         REQUIRE_CONTAINS("runtime-message");
     }
@@ -20,10 +20,12 @@ namespace un::log::test {
     TEST_CASE("004 - backend stats move on emitted log", "[004][backend][stats]") {
         runtime_state_guard guard;
 
-        util::capture_test_logs();
+        auto cfg = config<>::make("stats");
+        auto route = make_channel(cfg);
+        util::capture_test_logs(cfg);
 
         auto before = un::log::detail::backend_stats();
-        unlog::info("stats-check-{}", 7);
+        unlog::info(route, "stats-check-{}", 7);
         auto after = un::log::detail::backend_stats();
 
         CHECK(after.emitted == (before.emitted + 1u));
@@ -34,14 +36,14 @@ namespace un::log::test {
 
         auto cfg = config<>::make("counter-drop-oversize");
 
-        make_channel(cfg, true);
+        auto route = make_channel(cfg);
         util::capture_test_logs(cfg);
 
         auto before = un::log::detail::backend_stats();
         auto msg = std::string{"oversize-drop-"} + std::string(8192u, 'x');
         REQUIRE(msg.size() == 8206u);
 
-        unlog::info("{}", msg);
+        unlog::info(route, "{}", msg);
 
         auto after = un::log::detail::backend_stats();
         CHECK(after.emitted == before.emitted);
@@ -55,7 +57,7 @@ namespace un::log::test {
 
         auto cfg = config<options::truncate>::make("counter-truncate-oversize");
 
-        auto route = make_channel(cfg, false);
+        auto route = make_channel(cfg);
         util::capture_test_logs(cfg);
 
         auto before = un::log::detail::backend_stats();
@@ -77,7 +79,7 @@ namespace un::log::test {
 
         auto cfg = config<options::truncate, options::max_record_size<256>>::make("small-truncate-limit");
 
-        auto route = make_channel(cfg, false);
+        auto route = make_channel(cfg);
         util::capture_test_logs(cfg);
 
         auto max_message_size = backend::max_message_size_for_runtime_record_limit(decltype(cfg)::max_record_size);

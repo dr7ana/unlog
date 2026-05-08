@@ -85,12 +85,11 @@ namespace un::log {
         struct runtime_state {
             std::unordered_map<std::string, channel_id> channel_ids;
             std::deque<channel_state> channels;
-            std::optional<channel_id> default_channel_id;
             global_config global{};
             bool global_config_locked{false};
             ClockType clock_type{ClockType::steady};
             bool clock_type_set{false};
-            log_level default_level{log_level::info};
+            log_level current_level{log_level::info};
             // TODO(multithread-hardening): if setup/logging can run concurrently at high thread counts,
             // revisit this gate with explicit acquire/release ordering and stronger transition semantics.
             std::atomic<bool> is_active{false};
@@ -251,23 +250,6 @@ namespace un::log {
             return &st.channels[index];
         }
 
-        static const channel_state* find_channel_state(const runtime_state& st, channel_id id) noexcept {
-            auto index = static_cast<size_t>(id);
-            if (id == invalid_channel_id || index >= st.channels.size()) {
-                return nullptr;
-            }
-            return &st.channels[index];
-        }
-
-        static channel_handle make_channel_handle(const runtime_state& st, channel_id id) noexcept {
-            auto* state = find_channel_state(st, id);
-            if (!state) {
-                return {};
-            }
-
-            return channel_handle{id, state->name, state->max_message_size};
-        }
-
         static void set_runtime_clock_type(runtime_state& st, ClockType type) {
             if (!st.clock_type_set) {
                 st.clock_type = type;
@@ -352,13 +334,6 @@ namespace un::log {
                 default:
                     throw std::invalid_argument{"unsupported sink type"};
             }
-        }
-
-        static constexpr bool uses_default_channel_policy(const channel_registration& registration) noexcept {
-            return registration.runtime_mode == default_channel_policy::runtime_mode &&
-                   registration.timestamp_mode == default_channel_policy::clock_type &&
-                   registration.overflow_drop == (default_channel_policy::overflow_policy == OverflowPolicy::drop) &&
-                   registration.huge_pages == default_channel_policy::huge_pages;
         }
 
         static void add_configured_sink_locked(runtime_state& st, const channel_registration& registration) {
@@ -910,10 +885,9 @@ namespace un::log {
             }
         }
 
-        static channel_handle make_channel_route_locked(
-                runtime_state& st, channel_registration registration, bool make_default, bool allow_after_activation) {
+        static channel_handle make_channel_route_locked(runtime_state& st, channel_registration registration) {
 
-            if (!allow_after_activation && st.is_active.load(std::memory_order_relaxed)) {
+            if (st.is_active.load(std::memory_order_relaxed)) {
                 throw std::invalid_argument{"runtime is active; cannot register new channels"};
             }
 
@@ -930,11 +904,6 @@ namespace un::log {
                 throw std::invalid_argument{"channel message limit exceeds runtime queue slot payload capacity"};
             }
 
-            auto can_be_default = uses_default_channel_policy(registration);
-            if (make_default && !can_be_default) {
-                throw std::invalid_argument{"default channel must use the library default runtime policy"};
-            }
-
             set_runtime_clock_type(st, registration.timestamp_mode);
             add_configured_sink_locked(st, registration);
 
@@ -942,7 +911,7 @@ namespace un::log {
             st.channels.emplace_back(std::move(channel_name), registration.max_message_size);
 
             auto& state = st.channels.back();
-            state.set_level(st.default_level);
+            state.set_level(st.current_level);
             st.channel_ids.emplace(state.name, id);
 
             if (registration.runtime_mode == RuntimeMode::threadsafe) {
@@ -954,75 +923,37 @@ namespace un::log {
                 }
             }
 
-            if (make_default) {
-                st.default_channel_id = id;
-            }
-            else if (!st.default_channel_id.has_value() && can_be_default) {
-                st.default_channel_id = id;
-            }
-
             ensure_runtime_initialized_locked(st, registration);
             return channel_handle{id, state.name, state.max_message_size};
         }
 
-        static void ensure_default_channel(runtime_state& st) {
-            if (st.default_channel_id.has_value()) {
-                return;
-            }
-
-            auto conf = config<>::make();
-            auto max_message_size =
-                    detail::resolve_channel_max_message_size(static_cast<size_t>(decltype(conf)::max_record_size));
-
-            std::ignore = make_channel_route_locked(
-                    st,
-                    channel_registration{
-                            .name = conf.name,
-                            .max_message_size = max_message_size,
-                            .overflow_drop = detail::config_overflow_policy_v<decltype(conf)> == OverflowPolicy::drop,
-                            .can_truncate = true,
-                            .runtime_mode = detail::config_runtime_mode_v<decltype(conf)>,
-                            .timestamp_mode = detail::config_clock_type_v<decltype(conf)>,
-                            .huge_pages = decltype(conf)::use_huge_pages,
-                            .sink_type = detail::config_sink_type(conf),
-                            .format = conf.format,
-                            .color = conf.color(),
-                            .time_requirements = detail::config_format_requirements(conf),
-                            .filename = detail::config_filename(conf),
-                            .output_fd = detail::config_output_fd(conf),
-                            .unix_dgram_path = detail::config_unix_dgram_path(conf),
-                    },
-                    true,
-                    true);
-        }
-
-        log_level get_default_level() {
+        log_level get_current_level() {
             if (auto* st = try_access_state()) {
-                return st->default_level;
+                return st->current_level;
             }
 
             return log_level::info;
         }
 
-        void set_default_level(log_level level) {
+        void set_current_level(log_level level) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
             register_process_exit_hook_locked(control);
 
-            st.default_level = level;
+            st.current_level = level;
 
             for (auto& route : st.channels) {
                 route.set_level(level);
             }
         }
 
-        channel_handle make_channel_route(channel_registration registration, bool make_default) {
+        channel_handle make_channel_route(channel_registration registration) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
             register_process_exit_hook_locked(control);
-            return make_channel_route_locked(st, std::move(registration), make_default, false);
+            return make_channel_route_locked(st, std::move(registration));
         }
 
         void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry) {
@@ -1139,25 +1070,6 @@ namespace un::log {
                    st->producer_registry_huge.producer_count.load(std::memory_order_acquire);
         }
     }  // namespace test
-
-    channel<> global_channel() {
-        if (detail::runtime_is_shutting_down()) {
-            return {};
-        }
-
-        auto& control = detail::access_control();
-        std::lock_guard lock{control.mutex};
-        auto& st = detail::ensure_state_created_locked(control);
-        detail::register_process_exit_hook_locked(control);
-        detail::ensure_default_channel(st);
-
-        if (!st.default_channel_id.has_value()) {
-            return {};
-        }
-
-        auto handle = detail::make_channel_handle(st, *st.default_channel_id);
-        return channel<>{handle.id, handle.name, handle.max_message_size};
-    }
 
     void set_global_config(global_config cfg) {
         auto& control = detail::access_control();

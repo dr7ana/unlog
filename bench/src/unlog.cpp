@@ -24,9 +24,8 @@ namespace {
                         .thread_bufsize = unlog_bench::thread_bufsize_bytes,
                 });
 
-                auto config = make_config(options);
-                channel() = unlog::make_channel(config, false);
-                unlog::set_default_level(unlog::log_level::info);
+                std::ignore = channel(options);
+                unlog::set_current_level(unlog::log_level::info);
                 unlog::info(channel(), "warmup");
                 unlog::flush();
             });
@@ -53,8 +52,8 @@ namespace {
             return flag;
         }
 
-        static channel_type& channel() {
-            static channel_type instance;
+        static channel_type& channel(const unlog_bench::benchmark_options& options = unlog_bench::options()) {
+            static channel_type instance = unlog::make_channel(make_config(options));
             return instance;
         }
 
