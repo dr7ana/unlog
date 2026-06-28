@@ -3,14 +3,14 @@ module(
     version = "0.1.0",
 )
 
-bazel_dep(name = "rules_cc", version = "0.2.13")
+bazel_dep(name = "rules_cc", version = "0.2.20")
 bazel_dep(name = "platforms", version = "0.0.11")
-bazel_dep(name = "fmt", version = "12.1.0")
-bazel_dep(name = "catch2", version = "3.11.0")
+bazel_dep(name = "fmt", version = "12.2.0")
+bazel_dep(name = "catch2", version = "3.13.0")
 bazel_dep(name = "utl", version = "0.1.0")
 git_override(
     module_name = "utl",
-    commit = "2e774773f6ad569a5c75754bf5e37c32b41bc9eb",
+    commit = "f4fdcf007fcd647ac831605c6254574e996ad024",
     init_submodules = True,
     remote = "https://github.com/dr7ana/utl",
 )
@@ -18,6 +18,6 @@ git_override(
 bazel_dep(name = "allocazam", version = "0.1.0")
 git_override(
     module_name = "allocazam",
-    commit = "9afc67ed45760323f5cd8b91f62dd2eaca8a5d79",
+    commit = "5cfe98b9274a7cb3c2e04a3f52a5ba2ae0226135",
     remote = "https://github.com/dr7ana/allocazam",
 )
