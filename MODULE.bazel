@@ -4,9 +4,9 @@ module(
 )
 
 bazel_dep(name = "rules_cc", version = "0.2.20")
-bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "fmt", version = "12.2.0")
-bazel_dep(name = "catch2", version = "3.13.0")
+bazel_dep(name = "catch2", version = "3.15.1")
 bazel_dep(name = "utl", version = "0.1.0")
 git_override(
     module_name = "utl",
