@@ -31,17 +31,7 @@ else()
     set(UNLOG_IS_TOPLEVEL_PROJECT FALSE)
 endif()
 
-# TODO: not configured yet for shared vs static
-#option(BUILD_SHARED_LIBS "Build as shared library" OFF)
-#option(BUILD_STATIC_DEPS "Build and link against static dependencies" OFF)
-option(WARNINGS_AS_ERRORS "Treat all warnings as errors. turn off for development, on for release" OFF)
-option(UNLOG_BUILD_TESTS "Build unlog test suite" ${UNLOG_IS_TOPLEVEL_PROJECT})
-
-set(unlog_diagnostic_default OFF)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(unlog_diagnostic_default ON)
-endif()
-option(UNLOG_DIAGNOSTIC "Enable unlog diagnostic counters" ${unlog_diagnostic_default})
+include(build_opts)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,7 +82,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     list(APPEND warning_flags -Wno-unknown-warning-option)
 endif()
 
-if(WARNINGS_AS_ERRORS)
+if(UNLOG_USE_LIBCXX)
+    target_link_libraries(unlog PUBLIC "-lc++abi")
+endif()
+
+if(UNLOG_WARNINGS_AS_ERRORS)
     list(APPEND warning_flags -Werror)
 endif()
 
@@ -101,6 +95,10 @@ add_library(unlog_warnings INTERFACE)
 target_compile_options(unlog_warnings INTERFACE "$<$<OR:$<COMPILE_LANGUAGE:CXX>,$<COMPILE_LANGUAGE:C>>:${warning_flags}>")
 
 target_link_libraries(unlog INTERFACE unlog_warnings)
+
+if(UNLOG_ARM64)
+    target_link_libraries(unlog PUBLIC atomic)
+endif()
 
 if(UNLOG_BUILD_TESTS)
     add_subdirectory(tests)
