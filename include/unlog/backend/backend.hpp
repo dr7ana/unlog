@@ -3,6 +3,7 @@
 #include "unlog/config.hpp"
 #include "unlog/utils.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -41,7 +42,8 @@ namespace un::log::backend {
 
     struct sink_entry {
         sink_ptr sink;
-        std::string pattern;
+        pattern_program pattern;
+        mutable std::string render_buffer;
         bool color{false};
         backend::time_requirements requirements{backend::time_requirements::none};
     };

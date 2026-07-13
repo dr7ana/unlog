@@ -8,6 +8,7 @@
 #include "unlog/backend/record.hpp"
 
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
@@ -25,18 +26,41 @@ namespace un::log {
     using sink_ptr = backend::sink_ptr;
 
     namespace detail {
+        struct route_state {
+            route_state(channel_id route_id, std::string route_name) : id{route_id}, name{std::move(route_name)} {}
+
+            void configure_level(log_level value) noexcept { configured_level_ = value; }
+            void set_running_level(log_level value) noexcept {
+                configured_level_ = value;
+                level_.store(value, std::memory_order_relaxed);
+            }
+            void activate() noexcept { level_.store(configured_level_, std::memory_order_relaxed); }
+            void deactivate() noexcept { level_.store(log_level::off, std::memory_order_relaxed); }
+            [[nodiscard]] log_level level() const noexcept { return level_.load(std::memory_order_relaxed); }
+
+            channel_id id{invalid_channel_id};
+            std::string name;
+            backend::sink_entry sink;
+
+          private:
+            log_level configured_level_{log_level::info};
+            std::atomic<log_level> level_{log_level::off};
+        };
+
         template <
                 RuntimeMode Mode,
-                ClockType Clock,
                 OverflowPolicy Overflow,
                 bool HugePages,
-                backend::time_requirements TimeRequirements>
+                backend::time_requirements TimeRequirements,
+                bool CaptureSourceFile,
+                bool CaptureSourceLine>
         struct channel_policy {
             static constexpr auto runtime_mode = Mode;
-            static constexpr auto clock_type = Clock;
             static constexpr auto overflow_policy = Overflow;
             static constexpr bool huge_pages = HugePages;
             static constexpr auto time_requirements = TimeRequirements;
+            static constexpr bool capture_source_file = CaptureSourceFile;
+            static constexpr bool capture_source_line = CaptureSourceLine;
         };
 
     }  // namespace detail
@@ -44,34 +68,37 @@ namespace un::log {
     template <typename T, typename U = std::remove_cvref_t<T>>
     concept channel_policy_type = requires {
         { U::runtime_mode } -> std::convertible_to<RuntimeMode>;
-        { U::clock_type } -> std::convertible_to<ClockType>;
         { U::overflow_policy } -> std::convertible_to<OverflowPolicy>;
         { U::huge_pages } -> std::convertible_to<bool>;
         { U::time_requirements } -> std::convertible_to<backend::time_requirements>;
+        { U::capture_source_file } -> std::convertible_to<bool>;
+        { U::capture_source_line } -> std::convertible_to<bool>;
     };
 
-    template <channel_policy_type Policy>
+    template <global_config Global, channel_policy_type Policy>
     class channel;
+
+    template <global_config Global = default_global_config>
+    struct configured;
 
     namespace detail {
 
         template <basic_config_type Conf>
         using channel_policy_for = channel_policy<
                 config_runtime_mode_v<Conf>,
-                config_clock_type_v<Conf>,
                 config_overflow_policy_v<Conf>,
                 Conf::use_huge_pages,
-                Conf::format_requirements>;
+                Conf::format_requirements,
+                Conf::capture_source_file,
+                Conf::capture_source_line>;
 
         using default_channel_policy = channel_policy_for<config<>>;
 
-        template <basic_config_type Conf>
-        constexpr channel<channel_policy_for<Conf>> make_channel(const Conf& conf);
+        template <global_config Global, basic_config_type Conf>
+        constexpr channel<Global, channel_policy_for<Conf>> make_channel(const Conf& conf);
 
         struct channel_handle {
-            channel_id id{invalid_channel_id};
-            std::string_view name{};
-            size_t max_message_size{0};
+            route_state* route{nullptr};
         };
 
         template <typename Clock>
@@ -107,66 +134,17 @@ namespace un::log {
             return static_cast<uint8_t>(message_level) >= static_cast<uint8_t>(threshold);
         }
 
-        template <bool HugePages>
-        using runtime_queue_producer_t = backend::runtime_queue_producer<HugePages>;
-
-        runtime_queue_producer_t<false>& single_threaded_runtime_queue_producer_normal();
-        runtime_queue_producer_t<true>& single_threaded_runtime_queue_producer_huge();
-        runtime_queue_producer_t<false>& ensure_threadsafe_runtime_queue_producer_normal();
-        runtime_queue_producer_t<true>& ensure_threadsafe_runtime_queue_producer_huge();
-
-        template <un::log::channel_policy_type Policy>
-        runtime_queue_producer_t<Policy::huge_pages>& get_runtime_queue_producer() {
-            if constexpr (Policy::runtime_mode == RuntimeMode::single_threaded) {
-                if constexpr (Policy::huge_pages) {
-                    return single_threaded_runtime_queue_producer_huge();
-                }
-                else {
-                    return single_threaded_runtime_queue_producer_normal();
-                }
-            }
-            else {
-                if constexpr (Policy::huge_pages) {
-                    return ensure_threadsafe_runtime_queue_producer_huge();
-                }
-                else {
-                    return ensure_threadsafe_runtime_queue_producer_normal();
-                }
-            }
-        }
-
-        void notify_runtime_work_available() noexcept;
-
-        template <un::log::channel_policy_type Policy>
-        void note_runtime_work_available(runtime_queue_producer_t<Policy::huge_pages>& producer) noexcept {
-            if (!producer.try_mark_enqueued()) {
-                return;
-            }
-
-            if constexpr (Policy::runtime_mode == RuntimeMode::threadsafe) {
-                producer.publish_ready_bit();
-            }
-
-            notify_runtime_work_available();
-        }
-
-        void mark_runtime_active_after_commit() noexcept;
-
         struct produce_record_outcome {
             bool publish{false};
             bool truncated{false};
             std::exception_ptr error{};
         };
 
-        template <typename... Arg>
+        template <global_config Global, channel_policy_type Policy, typename Slot, typename... Arg>
         [[nodiscard]] constexpr produce_record_outcome produce_runtime_record(
-                backend::runtime_record_slot* slot,
-                auto& producer,
-                channel_id channel,
+                Slot* slot,
+                const route_state* route,
                 log_level level,
-                uint64_t timestamp,
-                uint64_t sequence,
-                size_t payload_limit,
                 bool overflow_drop,
                 const source_loc& source_location,
                 fmt::format_string<Arg...> format,
@@ -175,19 +153,23 @@ namespace un::log {
             auto constructed = false;
 
             try {
-                std::construct_at(slot);
+                std::construct_at(
+                        slot,
+                        route,
+                        level,
+                        [] {
+                            if constexpr (Policy::time_requirements != backend::time_requirements::none) {
+                                return clock_now_ns_for<Global.clock_type>();
+                            }
+                            return uint64_t{0};
+                        }(),
+                        Policy::capture_source_file ? source_location.filename : nullptr,
+                        Policy::capture_source_line ? static_cast<int32_t>(source_location.line) : int32_t{0});
                 constructed = true;
 
                 auto result = backend::write_record_slot(
                         *slot,
-                        channel,
-                        level,
-                        timestamp,
-                        producer.thread_id(),
-                        sequence,
-                        source_location,
                         overflow_drop ? OverflowPolicy::drop : OverflowPolicy::truncate,
-                        payload_limit,
                         format,
                         std::forward<Arg>(args)...);
 
@@ -214,32 +196,21 @@ namespace un::log {
             }
         }
 
-        template <un::log::channel_policy_type Policy, typename... Arg>
+        template <global_config Global, un::log::channel_policy_type Policy, typename... Arg>
         constexpr void log_message(
-                channel_id channel,
-                const char* channel_name,
-                size_t max_message_size,
+                backend::configured_producer_backend<Global>& runtime,
+                const route_state* route,
                 const source_loc& source_location,
                 log_level level,
                 fmt::format_string<Arg...> format,
                 Arg&&... args) {
-            if (!channel_name) {
-                return;
-            }
-
-            auto& producer = get_runtime_queue_producer<Policy>();
-            auto timestamp = clock_now_ns_for<Policy::clock_type>();
-            auto sequence = producer.next_sequence();
+            auto& producer = runtime.template producer<Policy>();
             auto outcome = produce_record_outcome{};
-            auto published = producer.queue().produce([&](backend::runtime_record_slot* slot) noexcept -> bool {
-                outcome = produce_runtime_record(
+            auto published = producer.queue().produce([&](auto* slot) noexcept -> bool {
+                outcome = produce_runtime_record<Global, Policy>(
                         slot,
-                        producer,
-                        channel,
+                        route,
                         level,
-                        timestamp,
-                        sequence,
-                        max_message_size,
                         Policy::overflow_policy == OverflowPolicy::drop,
                         source_location,
                         format,
@@ -265,41 +236,15 @@ namespace un::log {
             }
 #endif
 
-            note_runtime_work_available<Policy>(producer);
-            mark_runtime_active_after_commit();
-        }
-
-        void set_channel_level(channel_id id, log_level level) noexcept;
-        log_level channel_level(channel_id id) noexcept;
-
-        inline constexpr size_t resolve_channel_max_message_size(size_t max_record_size) {
-            auto max_message_size = backend::max_message_size_for_runtime_record_limit(max_record_size);
-            if (max_message_size.has_value()) {
-                return *max_message_size;
-            }
-
-            switch (backend::runtime_record_limit_status(max_record_size)) {
-                case backend::runtime_record_limit_result::too_small:
-                    throw std::invalid_argument{"channel max_record_size is too small to fit record metadata"};
-                case backend::runtime_record_limit_result::exceeds_runtime_slot:
-                    throw std::invalid_argument{"channel max_record_size exceeds runtime queue slot payload capacity"};
-                case backend::runtime_record_limit_result::supported:
-                    break;
-            }
-
-            throw std::invalid_argument{"channel max_record_size is invalid"};
+            runtime.template note_work<Policy>(producer);
         }
 
         struct channel_registration {
             std::string_view name;
-            size_t max_message_size{0};
-            bool overflow_drop{true};
-            bool can_truncate{false};
             RuntimeMode runtime_mode{RuntimeMode::single_threaded};
-            ClockType timestamp_mode{ClockType::steady};
             bool huge_pages{false};
             SinkType sink_type{SinkType::cout};
-            std::string_view format;
+            backend::pattern_program pattern;
             bool color{false};
             backend::time_requirements time_requirements{backend::time_requirements::none};
             std::optional<fs::path> filename{};
@@ -307,17 +252,27 @@ namespace un::log {
             std::optional<fs::path> unix_dgram_path{};
         };
 
-        channel_handle make_channel_route(channel_registration registration);
+        using producer_backend_factory = backend::runtime_producer_backend* (*)();
+        backend::runtime_producer_backend& access_producer_backend(global_config config, producer_backend_factory make);
+        channel_handle make_channel_route(
+                backend::runtime_producer_backend& producer_backend, channel_registration registration);
+        void set_route_level(
+                backend::runtime_producer_backend& producer_backend, route_state& route, log_level level) noexcept;
     }  // namespace detail
 
-    template <channel_policy_type Policy>
+    template <global_config Global, channel_policy_type Policy>
     class channel {
       public:
+        static constexpr auto global = Global;
         using policy_type = Policy;
 
         channel() = delete;
 
-        constexpr explicit operator bool() const noexcept { return id_ != invalid_channel_id; }
+        constexpr explicit operator bool() const noexcept { return route_ != nullptr; }
+
+        [[nodiscard]] constexpr bool enabled(log_level level) const noexcept {
+            return *this && detail::level_enabled(level, route_->level());
+        }
 
         template <typename... Arg>
         constexpr void log(
@@ -329,17 +284,13 @@ namespace un::log {
                 return;
             }
 
-            if (!detail::level_enabled(level, detail::channel_level(id_))) {
-                return;
-            }
-
-            detail::log_message<Policy>(
-                    id_, name_.data(), max_message_size_, source_location, level, format, std::forward<Arg>(args)...);
+            detail::log_message<Global, Policy>(
+                    *producer_backend_, route_, source_location, level, format, std::forward<Arg>(args)...);
         }
 
-        constexpr void set_level(log_level level) const noexcept {
+        void set_level(log_level level) const noexcept {
             if (*this) {
-                detail::set_channel_level(id_, level);
+                detail::set_route_level(*producer_backend_, *route_, level);
             }
         }
 
@@ -348,49 +299,49 @@ namespace un::log {
                 return log_level::off;
             }
 
-            return detail::channel_level(id_);
+            return route_->level();
         }
 
-        [[nodiscard]] constexpr std::string_view name() const noexcept { return name_; }
-        [[nodiscard]] constexpr channel_id id() const noexcept { return id_; }
+        [[nodiscard]] constexpr std::string_view name() const noexcept { return route_ ? route_->name : ""sv; }
+        [[nodiscard]] constexpr channel_id id() const noexcept { return route_ ? route_->id : invalid_channel_id; }
 
       private:
-        template <detail::basic_config_type Conf>
-        constexpr friend channel<detail::channel_policy_for<Conf>> detail::make_channel(const Conf& conf);
+        template <global_config Config, detail::basic_config_type Conf>
+        constexpr friend channel<Config, detail::channel_policy_for<Conf>> detail::make_channel(const Conf& conf);
 
-        constexpr channel(channel_id id, std::string_view name, size_t max_message_size) noexcept :
-                id_{id}, name_{name}, max_message_size_{max_message_size} {}
+        constexpr channel(
+                backend::configured_producer_backend<Global>& producer_backend, detail::route_state& route) noexcept :
+                producer_backend_{&producer_backend}, route_{&route} {}
 
-        channel_id id_{invalid_channel_id};
-        std::string_view name_{};
-        size_t max_message_size_{0};
+        backend::configured_producer_backend<Global>* producer_backend_{nullptr};
+        detail::route_state* route_{nullptr};
     };
 
     template <typename T, typename U = std::remove_cvref_t<T>>
     concept channel_type = requires { typename U::policy_type; } && channel_policy_type<typename U::policy_type> &&
-                           std::same_as<U, channel<typename U::policy_type>>;
+                           std::same_as<U, channel<U::global, typename U::policy_type>>;
 
-    using default_channel = channel<detail::default_channel_policy>;
+    using default_channel = channel<default_global_config, detail::default_channel_policy>;
 
     static_assert(channel_policy_type<detail::default_channel_policy>);
     static_assert(channel_type<default_channel>);
 
     namespace detail {
 
-        template <basic_config_type Conf>
-        constexpr channel<channel_policy_for<Conf>> make_channel(const Conf& conf) {
-            auto max_message_size = resolve_channel_max_message_size(static_cast<size_t>(Conf::max_record_size));
+        template <global_config Global, basic_config_type Conf>
+        constexpr channel<Global, channel_policy_for<Conf>> make_channel(const Conf& conf) {
+            auto& producer_backend = static_cast<backend::configured_producer_backend<Global>&>(access_producer_backend(
+                    Global, +[]() -> backend::runtime_producer_backend* {
+                        return new backend::configured_producer_backend<Global>{};
+                    }));
             auto handle = make_channel_route(
+                    producer_backend,
                     channel_registration{
                             .name = conf.name,
-                            .max_message_size = max_message_size,
-                            .overflow_drop = config_overflow_policy_v<Conf> == OverflowPolicy::drop,
-                            .can_truncate = true,
                             .runtime_mode = config_runtime_mode_v<Conf>,
-                            .timestamp_mode = config_clock_type_v<Conf>,
                             .huge_pages = Conf::use_huge_pages,
                             .sink_type = config_sink_type(conf),
-                            .format = conf.format,
+                            .pattern = config_pattern_program(conf),
                             .color = conf.color(),
                             .time_requirements = config_format_requirements(conf),
                             .filename = config_filename(conf),
@@ -398,33 +349,84 @@ namespace un::log {
                             .unix_dgram_path = config_unix_dgram_path(conf),
                     });
 
-            return channel<channel_policy_for<Conf>>{handle.id, handle.name, max_message_size};
+            return channel<Global, channel_policy_for<Conf>>{producer_backend, *handle.route};
         }
 
-        void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry);
+        void add_sink_route(backend::runtime_producer_backend& producer_backend, backend::sink_entry entry);
 
-        template <basic_config_type Conf>
+        template <global_config Global, basic_config_type Conf>
         inline void add_sink(const Conf& conf, sink_ptr sink) {
             add_sink_route(
-                    config_clock_type_v<Conf>,
+                    access_producer_backend(
+                            Global,
+                            +[]() -> backend::runtime_producer_backend* {
+                                return new backend::configured_producer_backend<Global>{};
+                            }),
                     backend::sink_entry{
                             .sink = std::move(sink),
-                            .pattern = std::string{conf.format},
+                            .pattern = config_pattern_program(conf),
+                            .render_buffer = {},
                             .color = conf.color(),
                             .requirements = config_format_requirements(conf),
                     });
         }
 
-        void flush_backend();
+        void flush_backend(backend::runtime_producer_backend& producer_backend);
+
+        void start_backend(backend::runtime_producer_backend& producer_backend);
+        void prewarm_backend(backend::runtime_producer_backend& producer_backend);
 
 #if UNLOG_DIAGNOSTIC
-        backend::producer_stats backend_stats();
+        backend::producer_stats backend_stats(backend::runtime_producer_backend& producer_backend);
 #endif
 
-        log_level get_current_level();
+        log_level get_global_level(backend::runtime_producer_backend& producer_backend);
 
-        void set_current_level(log_level level);
+        void set_global_level(backend::runtime_producer_backend& producer_backend, log_level level);
 
     }  // namespace detail
+
+    template <global_config Global>
+    struct configured {
+        static_assert(std::has_single_bit(Global.max_record_size));
+        static_assert(Global.max_record_size > sizeof(backend::record_slot_header));
+        static_assert(std::has_single_bit(Global.thread_bufsize));
+        static_assert(std::has_single_bit(Global.huge_thread_bufsize));
+        static_assert(Global.thread_bufsize >= Global.max_record_size);
+        static_assert(Global.huge_thread_bufsize >= options::default_huge_thread_bufsize);
+        static_assert(Global.thread_bufsize % Global.max_record_size == 0);
+        static_assert(Global.huge_thread_bufsize % Global.max_record_size == 0);
+        static_assert(Global.huge_thread_bufsize % options::default_huge_thread_bufsize == 0);
+        static_assert(std::has_single_bit(Global.huge_thread_bufsize / options::default_huge_thread_bufsize));
+        static_assert(std::has_single_bit(Global.max_producers));
+
+        static constexpr auto config = Global;
+        using producer_backend_type = backend::configured_producer_backend<Global>;
+
+        template <detail::basic_config_type Conf>
+        static constexpr auto make_channel(const Conf& conf) {
+            return detail::make_channel<Global>(conf);
+        }
+
+        // Completes producer construction and route activation. It must return before
+        // enabled logging begins concurrently on other threads.
+        static void start() { detail::start_backend(producer_backend()); }
+        static void prewarm_thread() { detail::prewarm_backend(producer_backend()); }
+        static void flush() { detail::flush_backend(producer_backend()); }
+        static void set_global_level(log_level level = log_level::info) {
+            detail::set_global_level(producer_backend(), level);
+        }
+        static log_level get_global_level() { return detail::get_global_level(producer_backend()); }
+
+#if UNLOG_DIAGNOSTIC
+        static backend::producer_stats stats() { return detail::backend_stats(producer_backend()); }
+#endif
+
+      private:
+        static producer_backend_type& producer_backend() {
+            return static_cast<producer_backend_type&>(detail::access_producer_backend(
+                    Global, +[]() -> backend::runtime_producer_backend* { return new producer_backend_type{}; }));
+        }
+    };
 
 }  // namespace un::log

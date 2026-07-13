@@ -24,11 +24,11 @@ namespace un::log {
             constexpr bool operator==(const source_loc&) const = default;
         };
 
+        // Pass-through by design: the basename strip happens on the consumer (%g render, cached
+        // per file-name pointer), so producers never scan the path — least of all on calls the
+        // level check is about to filter out.
         inline constexpr source_loc sloc(const std::source_location& loc) {
-            std::string_view sv{loc.file_name()};
-            if (auto p = sv.rfind('/'); p != sv.npos)
-                sv.remove_prefix(p + 1);
-            return source_loc{sv.data(), static_cast<int>(loc.line()), loc.function_name()};
+            return source_loc{loc.file_name(), static_cast<int>(loc.line()), loc.function_name()};
         }
     }  // namespace detail
 }  // namespace un::log

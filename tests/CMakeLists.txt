@@ -23,6 +23,8 @@ add_executable(
     007.cpp
     008.cpp
     009.cpp
+    010.cpp
+    011.cpp
 )
 
 target_link_libraries(alltests PRIVATE tests_common)

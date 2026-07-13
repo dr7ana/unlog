@@ -9,8 +9,9 @@ namespace un::log::test {
     TEST_CASE("002 - formatting uses default pattern markers", "[002][settings][format]") {
         runtime_state_guard guard;
         auto conf = config<>::make();
-        auto route = make_channel(conf);
+        auto route = test_log::make_channel(conf);
         util::capture_test_logs(conf);
+        test_log::start();
 
         unlog::info(route, "hello");
 
@@ -21,17 +22,18 @@ namespace un::log::test {
     TEST_CASE("002 - global config", "[002][settings]") {
         runtime_state_guard guard;
 
-        REQUIRE(unlog::get_current_level() == log_level::info);
+        REQUIRE(test_log::get_global_level() == log_level::info);
 
-        set_current_level(log_level::debug);
-        REQUIRE(unlog::get_current_level() == log_level::debug);
+        test_log::set_global_level(log_level::debug);
+        REQUIRE(test_log::get_global_level() == log_level::debug);
 
-        set_current_level();
-        REQUIRE(unlog::get_current_level() == log_level::info);
+        test_log::set_global_level();
+        REQUIRE(test_log::get_global_level() == log_level::info);
 
         auto conf = config<>::make();
-        auto route = make_channel(conf);
+        auto route = test_log::make_channel(conf);
         util::capture_test_logs(conf);
+        test_log::start();
 
         auto global_line = __LINE__ + 1;
         unlog::info(route, "hello from unlog");
@@ -45,9 +47,10 @@ namespace un::log::test {
         runtime_state_guard guard;
         auto cfg = config<>::make("runtime");
 
-        auto route = make_channel(cfg);
+        auto route = test_log::make_channel(cfg);
 
         util::capture_test_logs(cfg);
+        test_log::start();
 
         unlog::info(route, "runtime path ready");
         REQUIRE_CONTAINS("runtime path ready");
@@ -57,9 +60,10 @@ namespace un::log::test {
         runtime_state_guard guard;
         auto conf = config<options::pattern<"[%*] %v">>::make("custom");
 
-        auto route = make_channel(conf);
+        auto route = test_log::make_channel(conf);
 
         util::capture_test_logs(conf, log_level::info);
+        test_log::start();
 
         unlog::info(route, "hello");
         REQUIRE_CONTAINS("hello");
@@ -67,6 +71,19 @@ namespace un::log::test {
         auto output = util::captured_output();
         INFO("Contents: " << output);
         CHECK(std::regex_search(output, std::regex(R"(\[\+([0-9]+(?:\.[0-9]+)?)s\]\s+hello)")));
+    }
+
+    TEST_CASE("002 - consteval pattern compiler preserves literal token semantics", "[002][settings][format]") {
+        runtime_state_guard guard;
+        auto conf = config<options::pattern<"prefix%%|%v|%q|%">>::make("compiled-pattern");
+        auto route = test_log::make_channel(conf);
+        util::capture_test_logs(conf, log_level::info);
+        test_log::start();
+
+        unlog::info(route, "payload");
+        auto output = util::captured_output();
+
+        CHECK(output == "prefix%|payload|%q|%\n");
     }
 
 }  // namespace un::log::test

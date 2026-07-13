@@ -8,8 +8,9 @@ namespace un::log::test {
         runtime_state_guard guard;
 
         auto cfg = config<>::make("hotpotato");
-        auto route = make_channel(cfg);
+        auto route = test_log::make_channel(cfg);
         util::capture_test_logs(cfg);
+        test_log::start();
 
         unlog::info(route, "runtime-message");
 
@@ -21,12 +22,13 @@ namespace un::log::test {
         runtime_state_guard guard;
 
         auto cfg = config<>::make("stats");
-        auto route = make_channel(cfg);
+        auto route = test_log::make_channel(cfg);
         util::capture_test_logs(cfg);
+        test_log::start();
 
-        auto before = un::log::detail::backend_stats();
+        auto before = test_log::stats();
         unlog::info(route, "stats-check-{}", 7);
-        auto after = un::log::detail::backend_stats();
+        auto after = test_log::stats();
 
         CHECK(after.emitted == (before.emitted + 1u));
     }
@@ -36,16 +38,17 @@ namespace un::log::test {
 
         auto cfg = config<>::make("counter-drop-oversize");
 
-        auto route = make_channel(cfg);
+        auto route = test_log::make_channel(cfg);
         util::capture_test_logs(cfg);
+        test_log::start();
 
-        auto before = un::log::detail::backend_stats();
+        auto before = test_log::stats();
         auto msg = std::string{"oversize-drop-"} + std::string(8192u, 'x');
         REQUIRE(msg.size() == 8206u);
 
         unlog::info(route, "{}", msg);
 
-        auto after = un::log::detail::backend_stats();
+        auto after = test_log::stats();
         CHECK(after.emitted == before.emitted);
         CHECK(after.dropped == (before.dropped + 1u));
         CHECK(after.truncated == before.truncated);
@@ -57,16 +60,17 @@ namespace un::log::test {
 
         auto cfg = config<options::truncate>::make("counter-truncate-oversize");
 
-        auto route = make_channel(cfg);
+        auto route = test_log::make_channel(cfg);
         util::capture_test_logs(cfg);
+        test_log::start();
 
-        auto before = un::log::detail::backend_stats();
+        auto before = test_log::stats();
         auto msg = std::string{"oversize-truncate-"} + std::string(8192u, 'x');
         REQUIRE(msg.size() == 8210u);
 
         unlog::info(route, "{}", msg);
 
-        auto after = un::log::detail::backend_stats();
+        auto after = test_log::stats();
         CHECK(after.emitted == (before.emitted + 1u));
         CHECK(after.dropped == before.dropped);
         CHECK(after.truncated == (before.truncated + 1u));
@@ -74,29 +78,6 @@ namespace un::log::test {
         CHECK_NOT_CONTAINS{msg};
     }
 
-    TEST_CASE("004 - channel max_record_size tightens truncate budget", "[004][backend][stats][overflow]") {
-        runtime_state_guard guard;
-
-        auto cfg = config<options::truncate, options::max_record_size<256>>::make("small-truncate-limit");
-
-        auto route = make_channel(cfg);
-        util::capture_test_logs(cfg);
-
-        auto max_message_size = backend::max_message_size_for_runtime_record_limit(decltype(cfg)::max_record_size);
-        REQUIRE(max_message_size.has_value());
-
-        auto before = un::log::detail::backend_stats();
-        auto msg = std::string{"small-limit-"} + std::string(*max_message_size + 32u, 'x');
-
-        unlog::info(route, "{}", msg);
-
-        auto after = un::log::detail::backend_stats();
-        CHECK(after.emitted == (before.emitted + 1u));
-        CHECK(after.dropped == before.dropped);
-        CHECK(after.truncated == (before.truncated + 1u));
-        REQUIRE_CONTAINS{"small-limit-"};
-        CHECK_NOT_CONTAINS{msg};
-    }
 #endif
 
 }  // namespace un::log::test

@@ -28,7 +28,7 @@ namespace un::log::backend {
         static constexpr bool threadsafe{Mode == sink_mode::multi_consumer};
 
       public:
-        explicit ostream_sink(std::ostream& out, bool color = false) : out_{&out}, color_{color} {}
+        explicit ostream_sink(std::ostream& out) : out_{&out} {}
 
         void write(std::string_view line) override {
             if constexpr (threadsafe) {
@@ -46,7 +46,6 @@ namespace un::log::backend {
 
       private:
         std::ostream* out_;
-        bool color_;
         mutable std::mutex mutex_;
     };
 

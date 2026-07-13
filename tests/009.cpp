@@ -4,22 +4,27 @@
 
 namespace un::log::test {
 
-    TEST_CASE("009 - queue runtime traits derive power-of-two capacity from thread buffer", "[009][queue][traits]") {
-        using traits = backend::queue_runtime_traits<256, false>;
-        auto capacity = traits::queue_capacity_for(4096);
+    inline constexpr auto queue_test_config = global_config{
+            .thread_bufsize = 4096u,
+            .huge_thread_bufsize = options::default_huge_thread_bufsize,
+            .max_record_size = 256u,
+            .max_producers = 64u,
+    };
 
-        REQUIRE(capacity.has_value());
-        CHECK(capacity.value() == 16u);
-        STATIC_REQUIRE(traits::slot_size <= 256u);
-        CHECK(backend::queue_slot_capacity_for(4096, traits::slot_size) == capacity);
-        STATIC_REQUIRE(backend::queue_slot_capacity_for(traits::slot_size - 1u, traits::slot_size) == std::nullopt);
+    TEST_CASE("009 - configured queue derives capacity at compile time", "[009][queue][traits]") {
+        using traits = backend::configured_queue_traits<queue_test_config, false>;
+
+        STATIC_REQUIRE(sizeof(typename traits::record_slot) == queue_test_config.max_record_size);
+        STATIC_REQUIRE(traits::buffer_size == queue_test_config.thread_bufsize);
+        STATIC_REQUIRE(traits::capacity == 16u);
     }
 
     TEST_CASE("009 - queue producer stores fixed record slots through spsc queue", "[009][queue][producer]") {
-        using producer_t = backend::queue_producer<256, false>;
+        using producer_t = backend::configured_queue_producer<queue_test_config, false>;
         using record_slot_t = producer_t::record_slot;
 
-        auto producer = producer_t{42u, 4096u};
+        auto producer = producer_t{};
+        auto route = detail::route_state{channel_id{9}, "queue-slot"};
         auto source_location = detail::source_loc{
                 .filename = "queue_slot.cpp",
                 .line = 77,
@@ -28,18 +33,14 @@ namespace un::log::test {
 
         bool wrote_slot = false;
         auto produced = producer.queue().produce([&](record_slot_t* slot) noexcept -> bool {
-            std::construct_at(slot);
-            auto result = backend::write_record_slot(
-                    *slot,
-                    channel_id{9},
+            std::construct_at(
+                    slot,
+                    &route,
                     log_level::debug,
                     123u,
-                    producer.thread_id(),
-                    producer.next_sequence(),
-                    source_location,
-                    OverflowPolicy::drop,
-                    "queue-{}",
-                    7);
+                    source_location.filename,
+                    static_cast<int32_t>(source_location.line));
+            auto result = backend::write_record_slot(*slot, OverflowPolicy::drop, "queue-{}", 7);
             wrote_slot = result == backend::record_slot_write_result::written;
             if (!wrote_slot) {
                 std::destroy_at(slot);
@@ -55,12 +56,11 @@ namespace un::log::test {
         size_t consumed = 0;
         auto drain_count = producer.queue().consume_all([&](record_slot_t& slot) {
             ++consumed;
-            CHECK(slot.header.channel == channel_id{9});
+            CHECK(slot.header.route == &route);
             CHECK(slot.level() == log_level::debug);
             CHECK(slot.header.timestamp == 123u);
-            CHECK(slot.header.thread_id == producer.thread_id());
-            CHECK(slot.header.sequence == 0u);
-            CHECK(slot.source_location() == source_location);
+            CHECK(slot.header.source_file == source_location.filename);
+            CHECK(slot.header.source_line == source_location.line);
             CHECK(slot.message() == "queue-7"sv);
         });
 
@@ -70,14 +70,14 @@ namespace un::log::test {
     }
 
     TEST_CASE("009 - queue producer callback can cancel publish", "[009][queue][producer]") {
-        using producer_t = backend::queue_producer<256, false>;
+        using producer_t = backend::configured_queue_producer<queue_test_config, false>;
         using record_slot_t = producer_t::record_slot;
 
-        auto producer = producer_t{42u, 4096u};
+        auto producer = producer_t{};
         bool invoked = false;
         auto produced = producer.queue().produce([&](record_slot_t* slot) noexcept -> bool {
             invoked = true;
-            std::construct_at(slot);
+            std::construct_at(slot, nullptr, log_level::debug, 0u, nullptr, 0);
             std::destroy_at(slot);
             return false;
         });

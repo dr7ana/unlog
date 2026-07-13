@@ -3,6 +3,9 @@
 #include "unlog/backend/backend.hpp"
 #include "unlog/format.hpp"
 
+#include <charconv>
+#include <span>
+
 namespace un::log::backend {
     //
 
@@ -53,10 +56,13 @@ namespace un::log::backend {
     struct time_context {
         std::tm tm{};
         size_t millis{0};
-        std::string elapsed;
+        std::array<char, 32> elapsed_storage{};
+        size_t elapsed_size{0};
+
+        [[nodiscard]] std::string_view elapsed() const noexcept { return {elapsed_storage.data(), elapsed_size}; }
     };
 
-    inline std::string format_elapsed(std::chrono::nanoseconds elapsed) {
+    inline size_t format_elapsed(std::chrono::nanoseconds elapsed, std::span<char> output) {
         if (elapsed.count() < 0)
             elapsed = std::chrono::nanoseconds{0};
 
@@ -66,129 +72,109 @@ namespace un::log::backend {
         auto seconds = (ms / 1000) % 60;
         auto millis = ms % 1000;
 
-        if (hours > 0)
-            return "+{}h{:02d}m{:02d}.{:03d}s"_format(hours, minutes, seconds, millis);
-
-        if (minutes > 0)
-            return "+{}m{:02d}.{:03d}s"_format(minutes, seconds, millis);
-
-        return "+{}.{:03d}s"_format(ms / 1000, millis);
+        auto result = [&] {
+            if (hours > 0) {
+                return fmt::format_to_n(
+                        output.data(), output.size(), "+{}h{:02d}m{:02d}.{:03d}s", hours, minutes, seconds, millis);
+            }
+            if (minutes > 0) {
+                return fmt::format_to_n(output.data(), output.size(), "+{}m{:02d}.{:03d}s", minutes, seconds, millis);
+            }
+            return fmt::format_to_n(output.data(), output.size(), "+{}.{:03d}s", ms / 1000, millis);
+        }();
+        return std::min(static_cast<size_t>(result.size), output.size());
     }
 
-    inline std::string render_pattern(
-            std::string_view pattern,
-            bool color,
+    using source_basename_resolver = std::string_view (*)(void*, const char*);
+
+    inline void append_decimal(std::string& out, int64_t value) {
+        auto buffer = std::array<char, 24>{};
+        auto result = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value);
+        out.append(buffer.data(), result.ptr);
+    }
+
+    inline void append_two_digits(std::string& out, unsigned value) {
+        out.push_back(static_cast<char>('0' + (value / 10u) % 10u));
+        out.push_back(static_cast<char>('0' + value % 10u));
+    }
+
+    inline void append_three_digits(std::string& out, unsigned value) {
+        out.push_back(static_cast<char>('0' + (value / 100u) % 10u));
+        out.push_back(static_cast<char>('0' + (value / 10u) % 10u));
+        out.push_back(static_cast<char>('0' + value % 10u));
+    }
+
+    inline std::string_view render_pattern(
+            const sink_entry& sink,
             const log_entry& rec,
             const std::tm& tm,
             size_t millis,
-            std::string_view elapsed) {
-        std::string out;
-        out.reserve(pattern.size() + rec.message.size() + 64);
+            std::string_view elapsed,
+            void* basename_context,
+            source_basename_resolver resolve_basename) {
+        auto& out = sink.render_buffer;
+        out.clear();
+        auto required_capacity = sink.pattern.text.size() + rec.message.size() + 64u;
+        if (out.capacity() < required_capacity) {
+            out.reserve(required_capacity);
+        }
 
-        for (size_t i = 0; i < pattern.size(); ++i) {
-            auto ch = pattern[i];
-            if (ch != '%') {
-                out.push_back(ch);
-                continue;
-            }
-
-            if ((i + 1) >= pattern.size()) {
-                out.push_back('%');
-                break;
-            }
-
-            auto tok = pattern[++i];
-            switch (tok) {
-                case '%':
+        for (auto piece : sink.pattern.pieces) {
+            switch (piece.token) {
+                case pattern_token::literal:
+                    out.append(sink.pattern.text.data() + piece.offset, piece.size);
+                    break;
+                case pattern_token::percent:
                     out.push_back('%');
                     break;
-                case 'H':
-                    "{:02d}"_format_to(out, tm.tm_hour);
+                case pattern_token::hour:
+                    append_two_digits(out, static_cast<unsigned>(tm.tm_hour));
                     break;
-                case 'M':
-                    "{:02d}"_format_to(out, tm.tm_min);
+                case pattern_token::minute:
+                    append_two_digits(out, static_cast<unsigned>(tm.tm_min));
                     break;
-                case 'S':
-                    "{:02d}"_format_to(out, tm.tm_sec);
+                case pattern_token::second:
+                    append_two_digits(out, static_cast<unsigned>(tm.tm_sec));
                     break;
-                case 'e':
-                    "{:03d}"_format_to(out, millis);
+                case pattern_token::millis:
+                    append_three_digits(out, static_cast<unsigned>(millis));
                     break;
-                case '*':
-                    "{}"_format_to(out, elapsed);
+                case pattern_token::elapsed:
+                    out.append(elapsed);
                     break;
-                case 'n':
-                    "{}"_format_to(out, rec.logger_name);
+                case pattern_token::logger_name:
+                    out.append(rec.logger_name);
                     break;
-                case 'l':
-                    "{}"_format_to(out, log_level_string(rec.level));
+                case pattern_token::level:
+                    out.append(log_level_string(rec.level));
                     break;
-                case 'g':
-                    if (rec.source_location.filename)
-                        "{}"_format_to(out, rec.source_location.filename);
+                case pattern_token::source_file:
+                    if (rec.source_location.filename) {
+                        out.append(
+                                resolve_basename ? resolve_basename(basename_context, rec.source_location.filename)
+                                                 : std::string_view{rec.source_location.filename});
+                    }
                     break;
-                case '#':
-                    "{}"_format_to(out, rec.source_location.line);
+                case pattern_token::source_line:
+                    append_decimal(out, rec.source_location.line);
                     break;
-                case 'v':
-                    "{}"_format_to(out, rec.message);
+                case pattern_token::message:
+                    out.append(rec.message);
                     break;
-                case '^':
-                    if (color)
-                        "{}"_format_to(out, color_for_level(rec.level));
+                case pattern_token::color_start:
+                    if (sink.color) {
+                        out.append(color_for_level(rec.level));
+                    }
                     break;
-                case '$':
-                    if (color)
-                        "{}"_format_to(out, ansi_reset);
-                    break;
-                default:
-                    out.push_back('%');
-                    out.push_back(tok);
+                case pattern_token::color_end:
+                    if (sink.color) {
+                        out.append(ansi_reset);
+                    }
                     break;
             }
         }
-
+        out.push_back('\n');
         return out;
-    }
-
-    struct line_cache_entry {
-        std::string_view pattern;
-        bool color{false};
-        bool with_newline{false};
-        std::string line;
-    };
-
-    inline constexpr bool same_cache_key(
-            const line_cache_entry& entry, std::string_view pattern, bool color, bool with_newline) noexcept {
-        return entry.color == color && entry.with_newline == with_newline && entry.pattern == pattern;
-    }
-
-    inline constexpr std::string_view format_cache_line(
-            std::vector<line_cache_entry>& line_cache,
-            std::string_view pattern,
-            bool color,
-            bool with_newline,
-            const log_entry& rec,
-            const std::tm& tm,
-            size_t millis,
-            std::string_view elapsed) {
-        for (auto& entry : line_cache) {
-            if (same_cache_key(entry, pattern, color, with_newline))
-                return entry.line;
-        }
-
-        auto line = render_pattern(pattern, color, rec, tm, millis, elapsed);
-        if (with_newline)
-            line.push_back('\n');
-
-        line_cache.push_back(
-                line_cache_entry{
-                        .pattern = pattern,
-                        .color = color,
-                        .with_newline = with_newline,
-                        .line = std::move(line),
-                });
-        return line_cache.back().line;
     }
 
 }  // namespace un::log::backend

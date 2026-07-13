@@ -27,10 +27,6 @@ namespace un::log {
     inline namespace options {
         struct opt {};
 
-        struct clock : public virtual opt {};
-        struct steady final : public virtual clock {};
-        struct system final : public virtual clock {};
-
         struct runtime_mode_opt : public virtual opt {};
         struct single_threaded final : public virtual runtime_mode_opt {};
         struct threadsafe final : public virtual runtime_mode_opt {};
@@ -49,14 +45,10 @@ namespace un::log {
             using type = format_pattern<Pattern>;
         };
 
-        struct max_record_opt : public virtual opt {};
-        template <size_t N>
-        struct max_record_size final : public virtual max_record_opt {
-            static constexpr auto value{N};
-        };
-
-        inline constexpr size_t default_max_record_size{4096};
-        inline constexpr size_t default_thread_bufsize{1 << 20};
+        inline constexpr size_t default_thread_bufsize{size_t{1} << 20};
+        inline constexpr size_t default_huge_thread_bufsize{size_t{2} << 20};
+        inline constexpr size_t default_max_record_size{size_t{1} << 10};
+        inline constexpr size_t default_max_producers{size_t{1} << 14};
     }  // namespace options
 
     enum class log_level : uint8_t {
@@ -102,7 +94,15 @@ namespace un::log {
 
     struct global_config {
         size_t thread_bufsize{options::default_thread_bufsize};
+        size_t huge_thread_bufsize{options::default_huge_thread_bufsize};
+        size_t max_record_size{options::default_max_record_size};
+        size_t max_producers{options::default_max_producers};
+        ClockType clock_type{ClockType::steady};
+
+        constexpr bool operator==(const global_config&) const = default;
     };
+
+    inline constexpr global_config default_global_config{};
 
     inline constexpr auto sink_type_string(SinkType t) {
         switch (t) {
@@ -121,34 +121,24 @@ namespace un::log {
         }
     }
 
-    inline constexpr uint8_t default_flags_for_sink(SinkType sink_type) noexcept {
-        return (sink_type == SinkType::cout || sink_type == SinkType::cerr) ? Flags::color : 0;
-    }
-
-    inline constexpr std::string_view default_pattern_for(uint8_t flags) noexcept {
-        return (flags & Flags::color) ? DEFAULT_PATTERN_COLOR : DEFAULT_PATTERN;
-    }
-
     namespace detail {
         template <typename T, typename U = std::remove_cvref_t<T>>
-        concept base_opt_type = std::same_as<U, options::clock> || std::same_as<U, options::runtime_mode_opt> ||
-                                std::same_as<U, options::overflow> || std::same_as<U, options::huge_pages_opt>;
-
-        template <typename T, typename U = std::remove_cvref_t<T>>
-        concept base_val_opt_type = std::same_as<U, options::max_record_opt>;
+        concept base_opt_type = std::same_as<U, options::runtime_mode_opt> || std::same_as<U, options::overflow> ||
+                                std::same_as<U, options::huge_pages_opt>;
 
         template <typename Pattern>
         concept format_pattern_type = requires {
             { Pattern::uses_default_pattern } -> std::convertible_to<bool>;
             { Pattern::text } -> std::convertible_to<std::string_view>;
             { Pattern::requirements } -> std::convertible_to<backend::time_requirements>;
+            { Pattern::capture_source_file } -> std::convertible_to<bool>;
+            { Pattern::capture_source_line } -> std::convertible_to<bool>;
         };
 
         template <typename T, typename U = std::remove_cvref_t<T>>
         concept channel_opt_type =
-                std::derived_from<U, options::clock> || std::derived_from<U, options::runtime_mode_opt> ||
-                std::derived_from<U, options::overflow> || std::derived_from<U, options::huge_pages_opt> ||
-                std::derived_from<U, options::max_record_opt> || std::derived_from<U, options::pattern_opt>;
+                std::derived_from<U, options::runtime_mode_opt> || std::derived_from<U, options::overflow> ||
+                std::derived_from<U, options::huge_pages_opt> || std::derived_from<U, options::pattern_opt>;
 
         template <typename... Arg>
         concept require_channel_opts = (channel_opt_type<Arg> && ...);
@@ -158,11 +148,9 @@ namespace un::log {
 
         template <typename... Arg>
         concept valid_channel_opt_pack =
-                require_channel_opts<Arg...> && at_most_one_is_derived_from<options::clock, Arg...> &&
-                at_most_one_is_derived_from<options::runtime_mode_opt, Arg...> &&
+                require_channel_opts<Arg...> && at_most_one_is_derived_from<options::runtime_mode_opt, Arg...> &&
                 at_most_one_is_derived_from<options::overflow, Arg...> &&
                 at_most_one_is_derived_from<options::huge_pages_opt, Arg...> &&
-                at_most_one_is_derived_from<options::max_record_opt, Arg...> &&
                 at_most_one_is_derived_from<options::pattern_opt, Arg...>;
 
         template <base_opt_type Base, channel_opt_type Default, typename... Arg>
@@ -184,27 +172,6 @@ namespace un::log {
         template <base_opt_type Base, channel_opt_type Default, typename... Arg>
             requires valid_channel_opt_pack<Arg...>
         using resolve_opt_t = typename resolve_opt<Base, Default, Arg...>::type;
-
-        template <base_val_opt_type Base, size_t Default, typename... Arg>
-        struct resolve_val_opt;
-
-        template <base_val_opt_type Base, size_t Default>
-        struct resolve_val_opt<Base, Default> {
-            static constexpr auto value = Default;
-        };
-
-        template <base_val_opt_type Base, size_t Default, typename Head, typename... Tail>
-        struct resolve_val_opt<Base, Default, Head, Tail...> {
-            static constexpr auto value{[]() constexpr {
-                if constexpr (std::derived_from<Head, Base>)
-                    return Head::value;
-                return resolve_val_opt<Base, Default, Tail...>::value;
-            }()};
-        };
-
-        template <base_val_opt_type Base, size_t Default, typename... Arg>
-            requires valid_channel_opt_pack<Arg...>
-        inline constexpr auto resolve_val_opt_v = resolve_val_opt<Base, Default, Arg...>::value;
 
         template <typename Default, typename... Arg>
         struct resolve_pattern_opt;
@@ -234,27 +201,23 @@ namespace un::log {
 
         template <typename Conf>
         concept basic_config_type = requires(const Conf& conf) {
-            typename Conf::clock_type;
             typename Conf::runtime_mode_type;
             typename Conf::overflow_type;
             typename Conf::huge_pages_type;
             typename Conf::pattern_type;
             { Conf::runtime_mode } -> std::convertible_to<RuntimeMode>;
             { Conf::use_huge_pages } -> std::convertible_to<bool>;
-            { Conf::max_record_size } -> std::convertible_to<size_t>;
             { Conf::format_requirements } -> std::convertible_to<backend::time_requirements>;
+            { Conf::capture_source_file } -> std::convertible_to<bool>;
+            { Conf::capture_source_line } -> std::convertible_to<bool>;
             { conf.name } -> std::convertible_to<std::string_view>;
             { conf.flags } -> std::convertible_to<uint8_t>;
-            { conf.format } -> std::convertible_to<std::string_view>;
+            { conf.color() } -> std::convertible_to<bool>;
             { conf.sink_type } -> std::convertible_to<SinkType>;
             { conf.filename } -> std::same_as<const std::optional<fs::path>&>;
             { conf.output_fd } -> std::same_as<const std::optional<int>&>;
             { conf.unix_dgram_path } -> std::same_as<const std::optional<fs::path>&>;
         };
-
-        template <basic_config_type Conf>
-        inline constexpr auto config_clock_type_v =
-                std::derived_from<typename Conf::clock_type, options::system> ? ClockType::system : ClockType::steady;
 
         template <basic_config_type Conf>
         inline constexpr auto config_runtime_mode_v = Conf::runtime_mode;
@@ -288,12 +251,21 @@ namespace un::log {
         inline constexpr backend::time_requirements config_format_requirements(const Conf&) noexcept {
             return Conf::format_requirements;
         }
+
+        template <basic_config_type Conf>
+        inline constexpr backend::pattern_program config_pattern_program(const Conf& conf) noexcept {
+            if constexpr (Conf::pattern_type::uses_default_pattern) {
+                return conf.color() ? default_pattern_color_type::program() : default_pattern_plain_type::program();
+            }
+            else {
+                return Conf::pattern_type::program();
+            }
+        }
     }  // namespace detail
 
     template <typename... Arg>
         requires detail::valid_channel_opt_pack<Arg...>
     struct config {
-        using clock_type = detail::resolve_opt_t<options::clock, options::steady, Arg...>;
         using runtime_mode_type = detail::resolve_opt_t<options::runtime_mode_opt, options::single_threaded, Arg...>;
         using overflow_type = detail::resolve_opt_t<options::overflow, options::drop, Arg...>;
         using huge_pages_type = detail::resolve_opt_t<options::huge_pages_opt, options::normal_pages, Arg...>;
@@ -303,13 +275,12 @@ namespace un::log {
                                                    ? RuntimeMode::threadsafe
                                                    : RuntimeMode::single_threaded;
         static constexpr bool use_huge_pages = std::derived_from<huge_pages_type, options::huge_pages>;
-        static constexpr auto max_record_size =
-                detail::resolve_val_opt_v<options::max_record_opt, default_max_record_size, Arg...>;
         static constexpr auto format_requirements = pattern_type::requirements;
+        static constexpr bool capture_source_file = pattern_type::capture_source_file;
+        static constexpr bool capture_source_line = pattern_type::capture_source_line;
 
         std::string_view name{};
         uint8_t flags{};
-        std::string_view format{};
         SinkType sink_type{SinkType::cout};
         std::optional<fs::path> filename{};
         std::optional<int> output_fd{};
@@ -326,13 +297,6 @@ namespace un::log {
                 std::optional<fs::path> _unix_dgram_path = std::nullopt) :
                 name{_name},
                 flags{_flags},
-                format{[&]() constexpr {
-                    if constexpr (pattern_type::uses_default_pattern) {
-                        return default_pattern_for(_flags);
-                    }
-
-                    return pattern_type::text;
-                }()},
                 sink_type{_sink_type},
                 filename{std::move(_filename)},
                 output_fd{std::move(_output_fd)},
@@ -356,13 +320,9 @@ namespace un::log {
             }
         }
 
-        static constexpr auto make(std::string_view n = "unlog"sv) {
-            return config{n, SinkType::cout, default_flags_for_sink(SinkType::cout)};
-        }
+        static constexpr auto make(std::string_view n = "unlog"sv) { return config{n, SinkType::cout, 0}; }
 
-        static constexpr auto make_stderr(std::string_view n = "unlog"sv) {
-            return config{n, SinkType::cerr, default_flags_for_sink(SinkType::cerr)};
-        }
+        static constexpr auto make_stderr(std::string_view n = "unlog"sv) { return config{n, SinkType::cerr, 0}; }
 
         static constexpr auto make_file(fs::path file, std::string_view n = "unlog"sv) {
             return config{n, SinkType::file, 0, std::move(file)};

@@ -12,26 +12,28 @@
 namespace {
 
     struct unlog_provider {
+        static constexpr auto global = unlog::global_config{
+                .thread_bufsize = unlog_bench::thread_bufsize_bytes,
+                .huge_thread_bufsize = unlog_bench::thread_bufsize_bytes,
+        };
+        using logger = unlog::configured<global>;
         using config_type =
                 unlog::config<unlog::options::threadsafe, unlog::options::huge_pages, unlog::options::pattern<"%v">>;
-        using channel_type = unlog::channel<unlog::detail::channel_policy_for<config_type>>;
+        using channel_type = unlog::channel<global, unlog::detail::channel_policy_for<config_type>>;
 
         static constexpr std::string_view name() noexcept { return "unlog"; }
 
         static void initialize(const unlog_bench::benchmark_options& options) {
             std::call_once(init_flag(), [&options]() {
-                unlog::set_global_config({
-                        .thread_bufsize = unlog_bench::thread_bufsize_bytes,
-                });
-
                 std::ignore = channel(options);
-                unlog::set_current_level(unlog::log_level::info);
+                logger::set_global_level(unlog::log_level::info);
+                logger::start();
                 unlog::info(channel(), "warmup");
-                unlog::flush();
+                logger::flush();
             });
         }
 
-        static void prepare_thread() { unlog::prewarm_thread(); }
+        static void prepare_thread() { logger::prewarm_thread(); }
 
         static void log(const unlog_bench::log_message& message) {
             unlog::info(
@@ -44,7 +46,7 @@ namespace {
                     message.text.data());
         }
 
-        static void reset_state() { unlog::flush(); }
+        static void reset_state() { logger::flush(); }
 
       private:
         static std::once_flag& init_flag() {
@@ -53,7 +55,7 @@ namespace {
         }
 
         static channel_type& channel(const unlog_bench::benchmark_options& options = unlog_bench::options()) {
-            static channel_type instance = unlog::make_channel(make_config(options));
+            static channel_type instance = logger::make_channel(make_config(options));
             return instance;
         }
 

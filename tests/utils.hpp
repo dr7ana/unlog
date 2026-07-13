@@ -6,15 +6,23 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <array>
+#include <cerrno>
 #include <functional>
 #include <mutex>
-#include <ostream>
+#include <sstream>
+#include <string>
+#include <system_error>
 #include <utility>
-#include <vector>
 
 namespace un::log::test {
 
     using namespace un::log::literals;
+    using test_log = configured<default_global_config>;
 
     void get_runtime_backend(const std::function<void()>& fn);
     bool consumer_thread_started();
@@ -27,7 +35,7 @@ namespace un::log::test {
         static auto make_config(
                 std::string_view name = "unlog"sv,
                 SinkType sink_type = SinkType::cout,
-                uint8_t flags = Flags::color,
+                uint8_t flags = 0,
                 std::optional<fs::path> filename = std::nullopt,
                 std::optional<int> output_fd = std::nullopt,
                 std::optional<fs::path> unix_dgram_path = std::nullopt) {
@@ -52,6 +60,65 @@ namespace un::log::test {
         ~runtime_state_guard() { test_helper::reset_runtime_state(); }
     };
 
+    class socket_wrapper {
+      public:
+        socket_wrapper() = default;
+        explicit socket_wrapper(int fd) noexcept : fd_{fd} {}
+
+        ~socket_wrapper() { reset(); }
+
+        socket_wrapper(const socket_wrapper&) = delete;
+        socket_wrapper& operator=(const socket_wrapper&) = delete;
+
+        socket_wrapper(socket_wrapper&& other) noexcept : fd_{std::exchange(other.fd_, -1)} {}
+
+        socket_wrapper& operator=(socket_wrapper&& other) noexcept {
+            if (this != &other) {
+                reset(std::exchange(other.fd_, -1));
+            }
+            return *this;
+        }
+
+        [[nodiscard]] static socket_wrapper null_sink() {
+            auto fd = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (fd < 0) {
+                throw std::system_error{errno, std::generic_category(), "open /dev/null"};
+            }
+            return socket_wrapper{fd};
+        }
+
+        [[nodiscard]] static std::array<socket_wrapper, 2> make_pair() {
+            int sockets[2];
+            if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+                throw std::system_error{errno, std::generic_category(), "socketpair"};
+            }
+            return {socket_wrapper{sockets[0]}, socket_wrapper{sockets[1]}};
+        }
+
+        [[nodiscard]] int get() const noexcept { return fd_; }
+        [[nodiscard]] explicit operator bool() const noexcept { return fd_ >= 0; }
+
+        [[nodiscard]] std::string read_available(size_t capacity = 4096u) const {
+            auto output = std::string(capacity, '\0');
+            auto size = ::recv(fd_, output.data(), output.size(), MSG_DONTWAIT);
+            if (size < 0) {
+                throw std::system_error{errno, std::generic_category(), "recv socket"};
+            }
+            output.resize(static_cast<size_t>(size));
+            return output;
+        }
+
+        void reset(int replacement = -1) noexcept {
+            if (fd_ >= 0) {
+                ::close(fd_);
+            }
+            fd_ = replacement;
+        }
+
+      private:
+        int fd_{-1};
+    };
+
     struct util {
         static std::stringstream stream;
         static std::mutex stream_mutex;
@@ -68,29 +135,32 @@ namespace un::log::test {
             }
         };
 
+        template <global_config Global = default_global_config>
         static auto reset() {
-            unlog::flush();
+            configured<Global>::flush();
             std::lock_guard lock{stream_mutex};
             stream = {};
             stream.clear();
         }
 
-        static auto capture_test_logs(log_level level = get_current_level()) {
-            reset();
-            set_current_level(level);
+        template <global_config Global = default_global_config>
+        static auto capture_test_logs(log_level level = configured<Global>::get_global_level()) {
+            reset<Global>();
+            configured<Global>::set_global_level(level);
             auto conf = config<>::make("capture");
-            detail::add_sink(conf, std::make_shared<capture_sink>());
+            detail::add_sink<Global>(conf, std::make_shared<capture_sink>());
         }
 
-        template <detail::basic_config_type Conf>
-        static auto capture_test_logs(const Conf& conf, log_level level = get_current_level()) {
-            reset();
-            set_current_level(level);
-            detail::add_sink(conf, std::make_shared<capture_sink>());
+        template <global_config Global = default_global_config, detail::basic_config_type Conf>
+        static auto capture_test_logs(const Conf& conf, log_level level = configured<Global>::get_global_level()) {
+            reset<Global>();
+            configured<Global>::set_global_level(level);
+            detail::add_sink<Global>(conf, std::make_shared<capture_sink>());
         }
 
+        template <global_config Global = default_global_config>
         static std::string captured_output() {
-            unlog::flush();
+            configured<Global>::flush();
             std::lock_guard lock{stream_mutex};
             return stream.str();
         }

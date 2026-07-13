@@ -4,9 +4,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <concepts>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -28,133 +28,68 @@
 
 namespace un::log {
     namespace detail {
-        struct channel_state {
-            channel_state(std::string channel_name, size_t max_message_size) :
-                    name{std::move(channel_name)}, max_message_size{max_message_size} {}
-
-            void set_level(log_level level) noexcept { level_.store(level, std::memory_order_relaxed); }
-
-            [[nodiscard]] log_level level() const noexcept { return level_.load(std::memory_order_relaxed); }
-
-            std::string name;
-            size_t max_message_size{0};
-
-          private:
-            std::atomic<log_level> level_{log_level::info};
-        };
-
         struct configured_sink {
-            backend::sink_entry entry;
-            SinkType sink_type{SinkType::cout};
+            backend::sink_ptr sink;
             std::string target_key;
         };
 
-        struct consumer_sink_snapshot {
-            std::vector<backend::sink_entry> sinks;
-            backend::time_requirements time_requirements{backend::time_requirements::none};
-        };
-
-        template <bool HugePages>
-        using runtime_queue_producer = backend::runtime_queue_producer<HugePages>;
-
-        template <bool HugePages>
-        using runtime_queue_traits = backend::runtime_queue_traits<HugePages>;
-
-        static constexpr size_t threadsafe_producer_capacity{16384};
-        static constexpr size_t threadsafe_active_word_capacity =
-                (threadsafe_producer_capacity + size_t{63}) / size_t{64};
-
-        template <bool HugePages>
-        struct queue_producer_registry {
-            using producer_type = runtime_queue_producer<HugePages>;
-            using producer_ref = std::reference_wrapper<producer_type>;
-            using active_word_ref = std::reference_wrapper<backend::producer_active_word>;
-
-            std::mutex mutex;
-            std::deque<producer_type> producer_storage;
-            std::deque<backend::producer_active_word> active_word_storage;
-            std::vector<std::optional<producer_ref>> producer_slots;
-            std::vector<active_word_ref> active_words;
-            std::atomic<std::optional<producer_ref>*> producers_base{nullptr};
-            std::atomic<active_word_ref*> active_words_base{nullptr};
-            std::atomic<size_t> producer_count{0};
-        };
-
-        enum class runtime_lifecycle : uint8_t { uninitialized, initialized, shutting_down, shut_down };
+        enum class runtime_lifecycle : uint8_t { uninitialized, configuring, running, shutting_down, shut_down };
 
         struct runtime_state {
             std::unordered_map<std::string, channel_id> channel_ids;
-            std::deque<channel_state> channels;
+            std::deque<route_state> channels;
             global_config global{};
-            bool global_config_locked{false};
             ClockType clock_type{ClockType::steady};
-            bool clock_type_set{false};
-            log_level current_level{log_level::info};
-            // TODO(multithread-hardening): if setup/logging can run concurrently at high thread counts,
-            // revisit this gate with explicit acquire/release ordering and stronger transition semantics.
-            std::atomic<bool> is_active{false};
-            std::mutex runtime_mutex;
+            std::atomic<log_level> global_level{log_level::info};
+            backend::runtime_producer_backend* producer_backend{nullptr};
+            // Elapsed-time anchors are per-state so %* measures from runtime creation and
+            // resets with it, instead of anchoring to static-init time of this TU.
+            std::chrono::steady_clock::time_point startup_steady_time{std::chrono::steady_clock::now()};
+            std::chrono::system_clock::time_point startup_system_time{std::chrono::system_clock::now()};
+            std::chrono::nanoseconds startup_steady_ns{
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(startup_steady_time.time_since_epoch())};
+            std::chrono::nanoseconds startup_system_ns{
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(startup_system_time.time_since_epoch())};
             std::vector<configured_sink> configured_sinks;
             std::vector<backend::sink_entry> custom_sinks;
-            std::shared_ptr<consumer_sink_snapshot> consumer_sinks;
-            std::condition_variable consumer_cv;
+            backend::time_requirements custom_sink_requirements{backend::time_requirements::none};
             std::thread consumer_thread;
             bool consumer_started{false};
-            bool stop_requested{false};
+            std::atomic<bool> stop_requested{false};
+            // Eventcount for consumer notification. Keep the full width so rollover is not part
+            // of the handoff proof; implementations may still use an internal futex generation.
+            std::atomic<uint64_t> wake_seq{0};
             std::atomic<uint64_t> flush_requested{0};
             std::atomic<uint64_t> flush_completed{0};
-            std::unique_ptr<runtime_queue_producer<false>> single_threaded_producer_normal;
-            std::unique_ptr<runtime_queue_producer<true>> single_threaded_producer_huge;
-            queue_producer_registry<false> producer_registry_normal;
-            queue_producer_registry<true> producer_registry_huge;
-            size_t threadsafe_normal_channel_count{0};
-            size_t threadsafe_huge_channel_count{0};
+            std::atomic<uint32_t> active_flushers{0};
         };
 
         struct runtime_control {
             std::mutex mutex;
             std::atomic<runtime_state*> state{nullptr};
             std::atomic<runtime_lifecycle> lifecycle{runtime_lifecycle::uninitialized};
-            std::atomic<uint64_t> generation{0};
             bool process_exit_hook_registered{false};
         };
 
-        static std::shared_ptr<consumer_sink_snapshot> make_consumer_sink_snapshot(const runtime_state& runtime) {
-            auto snapshot = std::make_shared<consumer_sink_snapshot>();
-            snapshot->sinks.reserve(runtime.configured_sinks.size() + runtime.custom_sinks.size());
-
-            auto append = [&](const backend::sink_entry& entry) {
-                snapshot->time_requirements |= entry.requirements;
-                snapshot->sinks.push_back(entry);
-            };
-
-            for (const auto& sink : runtime.configured_sinks) {
-                append(sink.entry);
-            }
-
-            for (const auto& sink : runtime.custom_sinks) {
-                append(sink);
-            }
-
-            return snapshot;
+        static runtime_control& access_control() {
+            // Immortal: never destroyed, so late log calls (TLS destructors, detached threads,
+            // atexit handlers ordered after ours) always dereference live control.
+            static runtime_control& control = *new runtime_control{};
+            return control;
         }
 
-        static runtime_control& access_control() {
-            static runtime_control control;
-            return control;
+        static void register_process_exit_hook_locked(runtime_control& control);
+
+        // Retired states stay reachable forever: threads racing a test reset may still hold
+        // pointers into the old state, and keeping the list rooted in an immortal vector makes
+        // the retirement a leak-sanitizer-visible retention rather than a leak.
+        static void retire_state_locked(runtime_state* state) {
+            static std::vector<runtime_state*>& retired = *new std::vector<runtime_state*>{};
+            retired.push_back(state);
         }
 
         static runtime_state* try_access_state() noexcept {
             return access_control().state.load(std::memory_order_acquire);
-        }
-
-        static runtime_state& access_state() {
-            auto* state = try_access_state();
-            if (!state) {
-                throw std::logic_error{"runtime state is not initialized"};
-            }
-
-            return *state;
         }
 
         static runtime_state& ensure_state_created_locked(runtime_control& control) {
@@ -167,30 +102,68 @@ namespace un::log {
             if (!state) {
                 state = new runtime_state{};
                 control.state.store(state, std::memory_order_release);
-                control.lifecycle.store(runtime_lifecycle::initialized, std::memory_order_release);
-                control.generation.fetch_add(1, std::memory_order_acq_rel);
+                control.lifecycle.store(runtime_lifecycle::configuring, std::memory_order_release);
             }
 
             return *state;
         }
 
+        static void wake_consumer(runtime_state& runtime) noexcept {
+            runtime.wake_seq.fetch_add(1, std::memory_order_release);
+            runtime.wake_seq.notify_one();
+        }
+
+        backend::runtime_producer_backend& access_producer_backend(
+                global_config config, producer_backend_factory make) {
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
+
+            if (st.producer_backend) {
+                if (st.global != config) {
+                    throw std::invalid_argument{"process already uses a different compile-time global configuration"};
+                }
+                return *st.producer_backend;
+            }
+            if (!make) {
+                throw std::invalid_argument{"producer backend factory is null"};
+            }
+
+            st.global = config;
+            st.clock_type = config.clock_type;
+            st.producer_backend = make();
+            st.producer_backend->bind_waker(
+                    &st, +[](void* context) noexcept { wake_consumer(*static_cast<runtime_state*>(context)); });
+            return *st.producer_backend;
+        }
+
         static void shutdown_runtime_state(runtime_state& runtime) noexcept {
-            if (!runtime.consumer_started) {
-                return;
+            if (runtime.consumer_started) {
+                runtime.stop_requested.store(true, std::memory_order_release);
+                wake_consumer(runtime);
+                if (runtime.consumer_thread.joinable()) {
+                    runtime.consumer_thread.join();
+                }
+
+                runtime.consumer_started = false;
+                runtime.stop_requested.store(false, std::memory_order_relaxed);
             }
 
-            {
-                std::lock_guard lock{runtime.runtime_mutex};
-                runtime.stop_requested = true;
+            for (auto& route : runtime.channels) {
+                route.sink.sink.reset();
+                std::string{}.swap(route.sink.render_buffer);
             }
+            runtime.configured_sinks.clear();
+            runtime.custom_sinks.clear();
+            runtime.custom_sink_requirements = backend::time_requirements::none;
+        }
 
-            runtime.consumer_cv.notify_all();
-            if (runtime.consumer_thread.joinable()) {
-                runtime.consumer_thread.join();
+        static void wait_for_active_flushers(runtime_state& runtime) noexcept {
+            for (auto count = runtime.active_flushers.load(std::memory_order_acquire); count != 0;
+                 count = runtime.active_flushers.load(std::memory_order_acquire)) {
+                runtime.active_flushers.wait(count, std::memory_order_acquire);
             }
-
-            runtime.consumer_started = false;
-            runtime.stop_requested = false;
         }
 
         static void destroy_runtime(runtime_lifecycle final_lifecycle) noexcept {
@@ -211,17 +184,29 @@ namespace un::log {
                 }
 
                 control.lifecycle.store(runtime_lifecycle::shutting_down, std::memory_order_release);
+
+                // Silence producers before taking the consumer down: every log call gates on the
+                // channel level, so racing threads stop enqueuing while the state stays alive.
+                for (auto& channel : state->channels) {
+                    channel.deactivate();
+                }
             }
 
+            wait_for_active_flushers(*state);
             shutdown_runtime_state(*state);
 
             {
                 std::lock_guard lock{control.mutex};
-                control.state.store(nullptr, std::memory_order_release);
+                if (final_lifecycle == runtime_lifecycle::uninitialized) {
+                    // Test reset: retire the old state (never deleted) so stale references held
+                    // by racing threads stay valid; the next use creates a fresh state.
+                    retire_state_locked(state);
+                    control.state.store(nullptr, std::memory_order_release);
+                }
+                // Process exit keeps the state pointer intact: late log calls dereference live
+                // (silenced) state instead of freed memory.
                 control.lifecycle.store(final_lifecycle, std::memory_order_release);
             }
-
-            delete state;
         }
 
         static void shutdown_runtime_for_process_exit() noexcept {
@@ -237,47 +222,12 @@ namespace un::log {
             control.process_exit_hook_registered = true;
         }
 
-        static bool runtime_is_shutting_down() noexcept {
-            auto lifecycle = access_control().lifecycle.load(std::memory_order_acquire);
-            return lifecycle == runtime_lifecycle::shutting_down || lifecycle == runtime_lifecycle::shut_down;
-        }
-
-        static channel_state* find_channel_state(runtime_state& st, channel_id id) noexcept {
-            auto index = static_cast<size_t>(id);
-            if (id == invalid_channel_id || index >= st.channels.size()) {
-                return nullptr;
-            }
-            return &st.channels[index];
-        }
-
-        static void set_runtime_clock_type(runtime_state& st, ClockType type) {
-            if (!st.clock_type_set) {
-                st.clock_type = type;
-                st.clock_type_set = true;
-                return;
-            }
-
-            if (st.clock_type != type) {
-                throw std::invalid_argument{"cannot mix different backend clock types in one runtime"};
-            }
-        }
-
-        static void validate_global_config(const global_config& cfg) {
-            if (!runtime_queue_traits<false>::queue_capacity_for(cfg.thread_bufsize).has_value()) {
-                throw std::invalid_argument{
-                        "global thread_bufsize does not provide enough capacity for one producer record slot"};
-            }
-        }
-
         static std::string sink_target_key(
                 SinkType sink_type,
-                std::string_view pattern,
                 const std::optional<fs::path>& filename,
                 const std::optional<int>& output_fd,
                 const std::optional<fs::path>& unix_dgram_path) {
             auto key = std::string{sink_type_string(sink_type)};
-            key.push_back('|');
-            key.append(pattern);
             key.push_back('|');
 
             switch (sink_type) {
@@ -313,9 +263,9 @@ namespace un::log {
                 const std::optional<fs::path>& unix_dgram_path) {
             switch (sink_type) {
                 case SinkType::cout:
-                    return std::make_shared<backend::ostream_sink_sc>(std::cout, true);
+                    return std::make_shared<backend::ostream_sink_sc>(std::cout);
                 case SinkType::cerr:
-                    return std::make_shared<backend::ostream_sink_sc>(std::cerr, true);
+                    return std::make_shared<backend::ostream_sink_sc>(std::cerr);
                 case SinkType::fd:
                     if (!output_fd.has_value()) {
                         throw std::invalid_argument{"fd sink requires output_fd"};
@@ -336,268 +286,32 @@ namespace un::log {
             }
         }
 
-        static void add_configured_sink_locked(runtime_state& st, const channel_registration& registration) {
+        static backend::sink_ptr configured_sink_for_locked(
+                runtime_state& st, const channel_registration& registration) {
             auto key = sink_target_key(
                     registration.sink_type,
-                    registration.format,
                     registration.filename,
                     registration.output_fd,
                     registration.unix_dgram_path);
 
-            std::lock_guard runtime_lock{st.runtime_mutex};
             auto duplicate = std::ranges::find_if(
                     st.configured_sinks, [&key](const configured_sink& sink) { return sink.target_key == key; });
             if (duplicate != st.configured_sinks.end()) {
-                return;
+                return duplicate->sink;
             }
 
-            st.configured_sinks.push_back(
-                    configured_sink{
-                            .entry =
-                                    backend::sink_entry{
-                                            .sink = make_configured_sink(
-                                                    registration.sink_type,
-                                                    registration.filename,
-                                                    registration.output_fd,
-                                                    registration.unix_dgram_path),
-                                            .pattern = std::string{registration.format},
-                                            .color = registration.color,
-                                            .requirements = registration.time_requirements,
-                                    },
-                            .sink_type = registration.sink_type,
-                            .target_key = std::move(key),
-                    });
-            st.consumer_sinks = make_consumer_sink_snapshot(st);
+            auto sink = make_configured_sink(
+                    registration.sink_type,
+                    registration.filename,
+                    registration.output_fd,
+                    registration.unix_dgram_path);
+            st.configured_sinks.push_back(configured_sink{.sink = sink, .target_key = std::move(key)});
+            return sink;
         }
-
-        static uint64_t current_thread_id() {
-            return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-        }
-
-        template <bool HugePages>
-        static std::unique_ptr<runtime_queue_producer<HugePages>>& single_threaded_producer_slot(runtime_state& st) {
-            if constexpr (HugePages) {
-                return st.single_threaded_producer_huge;
-            }
-            else {
-                return st.single_threaded_producer_normal;
-            }
-        }
-
-        template <bool HugePages>
-        static queue_producer_registry<HugePages>& producer_registry_slot(runtime_state& st) {
-            if constexpr (HugePages) {
-                return st.producer_registry_huge;
-            }
-            else {
-                return st.producer_registry_normal;
-            }
-        }
-
-        template <bool HugePages>
-        static void reconfigure_threadsafe_registry(runtime_state& st, size_t thread_bufsize) {
-            auto& registry = producer_registry_slot<HugePages>(st);
-            auto producer_count = registry.producer_count.load(std::memory_order_acquire);
-            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
-            if (!producers_base) {
-                return;
-            }
-
-            for (size_t i = 0; i < producer_count; ++i) {
-                producers_base[i]->get().reconfigure(thread_bufsize);
-            }
-        }
-
-        static void reconfigure_runtime_queue_producers(runtime_state& st, size_t thread_bufsize) {
-            if (st.single_threaded_producer_normal) {
-                st.single_threaded_producer_normal->reconfigure(thread_bufsize);
-            }
-
-            if (st.single_threaded_producer_huge) {
-                st.single_threaded_producer_huge->reconfigure(thread_bufsize);
-            }
-
-            reconfigure_threadsafe_registry<false>(st, thread_bufsize);
-            reconfigure_threadsafe_registry<true>(st, thread_bufsize);
-        }
-
-        static void ensure_global_config_locked(runtime_state& st) {
-            if (st.global_config_locked) {
-                return;
-            }
-
-            validate_global_config(st.global);
-            reconfigure_runtime_queue_producers(st, st.global.thread_bufsize);
-            st.global_config_locked = true;
-        }
-
-        template <bool HugePages>
-        static void ensure_threadsafe_registry_storage_locked(queue_producer_registry<HugePages>& registry) {
-            if (registry.producer_slots.empty()) {
-                registry.producer_slots.resize(threadsafe_producer_capacity);
-                registry.producers_base.store(registry.producer_slots.data(), std::memory_order_release);
-            }
-
-            if (registry.active_word_storage.empty()) {
-                for (size_t i = 0; i < threadsafe_active_word_capacity; ++i) {
-                    registry.active_word_storage.emplace_back();
-                }
-
-                registry.active_words.reserve(threadsafe_active_word_capacity);
-                for (auto& word : registry.active_word_storage) {
-                    registry.active_words.push_back(std::ref(word));
-                }
-
-                registry.active_words_base.store(registry.active_words.data(), std::memory_order_release);
-            }
-        }
-
-        template <bool HugePages>
-        static runtime_queue_producer<HugePages>& register_runtime_queue_producer(runtime_state& st) {
-            auto& registry = producer_registry_slot<HugePages>(st);
-            std::lock_guard lock{registry.mutex};
-            ensure_threadsafe_registry_storage_locked(registry);
-
-            auto producer_index = registry.producer_storage.size();
-            if (producer_index >= threadsafe_producer_capacity) {
-                throw std::runtime_error{"threadsafe producer capacity exceeded"};
-            }
-
-            registry.producer_storage.emplace_back(current_thread_id(), st.global.thread_bufsize);
-            auto& producer = registry.producer_storage.back();
-            registry.producer_slots[producer_index] = std::ref(producer);
-
-            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
-            producer.bind_active_word(active_words_base[producer_index / size_t{64}].get(), producer_index);
-            registry.producer_count.store(producer_index + size_t{1}, std::memory_order_release);
-            return producer;
-        }
-
-        template <bool HugePages>
-        static runtime_queue_producer<HugePages>& single_threaded_runtime_queue_producer() {
-            auto& st = access_state();
-            auto& producer = single_threaded_producer_slot<HugePages>(st);
-            if (!producer) {
-                producer = std::make_unique<runtime_queue_producer<HugePages>>(
-                        current_thread_id(), st.global.thread_bufsize);
-            }
-
-            return *producer;
-        }
-
-        runtime_queue_producer_t<false>& single_threaded_runtime_queue_producer_normal() {
-            return single_threaded_runtime_queue_producer<false>();
-        }
-
-        runtime_queue_producer_t<true>& single_threaded_runtime_queue_producer_huge() {
-            return single_threaded_runtime_queue_producer<true>();
-        }
-
-        struct tls_runtime_queue_state {
-            runtime_state* owner{nullptr};
-            uint64_t generation{0};
-            size_t producer_index{std::numeric_limits<size_t>::max()};
-        };
-
-        template <bool HugePages>
-        static runtime_queue_producer<HugePages>& ensure_threadsafe_runtime_queue_producer(runtime_state& st) {
-            static thread_local tls_runtime_queue_state tls_state;
-            auto generation = access_control().generation.load(std::memory_order_acquire);
-            if (tls_state.owner != &st || tls_state.generation != generation ||
-                tls_state.producer_index == std::numeric_limits<size_t>::max()) {
-                auto& producer = register_runtime_queue_producer<HugePages>(st);
-                tls_state.owner = &st;
-                tls_state.generation = generation;
-                tls_state.producer_index = producer.producer_index();
-            }
-
-            auto& registry = producer_registry_slot<HugePages>(st);
-            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
-            return producers_base[tls_state.producer_index]->get();
-        }
-
-        runtime_queue_producer_t<false>& ensure_threadsafe_runtime_queue_producer_normal() {
-            return ensure_threadsafe_runtime_queue_producer<false>(access_state());
-        }
-
-        runtime_queue_producer_t<true>& ensure_threadsafe_runtime_queue_producer_huge() {
-            return ensure_threadsafe_runtime_queue_producer<true>(access_state());
-        }
-
-#if UNLOG_DIAGNOSTIC
-        static std::vector<backend::producer_stats> runtime_queue_producer_snapshot() {
-            auto* st = try_access_state();
-            if (!st) {
-                return {};
-            }
-
-            auto out = std::vector<backend::producer_stats>{};
-
-            if (st->single_threaded_producer_normal) {
-                out.push_back(st->single_threaded_producer_normal->stats());
-            }
-
-            if (st->single_threaded_producer_huge) {
-                out.push_back(st->single_threaded_producer_huge->stats());
-            }
-
-            auto collect = [&out]<bool HugePages>(queue_producer_registry<HugePages>& registry) {
-                auto producer_count = registry.producer_count.load(std::memory_order_acquire);
-                auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
-                if (!producers_base) {
-                    return;
-                }
-
-                out.reserve(out.size() + producer_count);
-                for (size_t i = 0; i < producer_count; ++i) {
-                    out.push_back(producers_base[i]->get().stats());
-                }
-            };
-
-            collect(st->producer_registry_normal);
-            collect(st->producer_registry_huge);
-            return out;
-        }
-#endif
-
-        template <bool HugePages>
-        static bool registry_has_pending_work(runtime_state& runtime) {
-            auto& registry = producer_registry_slot<HugePages>(runtime);
-            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
-            if (!active_words_base) {
-                return false;
-            }
-
-            for (size_t word_index = 0; word_index < threadsafe_active_word_capacity; ++word_index) {
-                if (active_words_base[word_index].get().bits.load(std::memory_order_acquire) != 0) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        static bool runtime_has_pending_work(runtime_state& runtime) {
-            if (runtime.single_threaded_producer_normal && !runtime.single_threaded_producer_normal->queue().empty()) {
-                return true;
-            }
-
-            if (runtime.single_threaded_producer_huge && !runtime.single_threaded_producer_huge->queue().empty()) {
-                return true;
-            }
-
-            return registry_has_pending_work<false>(runtime) || registry_has_pending_work<true>(runtime);
-        }
-
-        auto runtime_startup_steady_time = std::chrono::steady_clock::now();
-        auto runtime_startup_system_time = std::chrono::system_clock::now();
-        auto runtime_startup_steady_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(runtime_startup_steady_time.time_since_epoch());
-        auto runtime_startup_system_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(runtime_startup_system_time.time_since_epoch());
 
         template <bool NeedsWallClock, bool NeedsElapsed>
-        static backend::time_context resolve_runtime_time_context(uint64_t timestamp, ClockType clock_type) {
+        static backend::time_context resolve_runtime_time_context(
+                const runtime_state& runtime, uint64_t timestamp, ClockType clock_type) {
             auto context = backend::time_context{};
 
             if constexpr (!(NeedsWallClock || NeedsElapsed)) {
@@ -616,7 +330,8 @@ namespace un::log {
                 }
 
                 if constexpr (NeedsElapsed) {
-                    context.elapsed = backend::format_elapsed(system_ticks - runtime_startup_system_ns);
+                    context.elapsed_size =
+                            backend::format_elapsed(system_ticks - runtime.startup_system_ns, context.elapsed_storage);
                 }
 
                 return context;
@@ -624,191 +339,164 @@ namespace un::log {
 
             auto steady_ticks = backend::ticks_to_ns(timestamp);
             auto elapsed = std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                    steady_ticks - runtime_startup_steady_ns);
+                    steady_ticks - runtime.startup_steady_ns);
 
             if constexpr (NeedsWallClock) {
-                std::chrono::system_clock::time_point sample_system = runtime_startup_system_time + elapsed;
+                std::chrono::system_clock::time_point sample_system = runtime.startup_system_time + elapsed;
                 context.tm = backend::local_time(sample_system);
                 context.millis = backend::millis_part(sample_system);
             }
 
             if constexpr (NeedsElapsed) {
-                context.elapsed = backend::format_elapsed(elapsed);
+                context.elapsed_size = backend::format_elapsed(elapsed, context.elapsed_storage);
             }
 
             return context;
         }
 
+        struct consumer_scratch {
+            // file-name pointer → basename suffix within the same literal. Producers stopped
+            // stripping (sloc is a pass-through), so %g resolves here; source_location file
+            // names are per-TU string literals, so this stays tiny and hits ~always. The
+            // last-hit memo covers the common case (records arrive in bursts from one call
+            // site) with a single pointer compare; the map bounds the miss cost no matter how
+            // many TUs an embedder logs from.
+            const char* last_filename{nullptr};
+            std::string_view last_basename;
+            std::unordered_map<const char*, std::string_view> basename_cache;
+        };
+
+        static std::string_view cached_source_basename(consumer_scratch& scratch, const char* filename) {
+            if (!filename) {
+                return {};
+            }
+
+            if (filename == scratch.last_filename) {
+                return scratch.last_basename;
+            }
+
+            auto [it, inserted] = scratch.basename_cache.try_emplace(filename, std::string_view{filename});
+            if (inserted) {
+                if (auto p = it->second.rfind('/'); p != it->second.npos) {
+                    it->second.remove_prefix(p + 1u);
+                }
+            }
+
+            scratch.last_filename = filename;
+            scratch.last_basename = it->second;
+            return it->second;
+        }
+
+        static std::string_view resolve_cached_source_basename(void* context, const char* filename) {
+            return cached_source_basename(*static_cast<consumer_scratch*>(context), filename);
+        }
+
         static backend::log_entry make_runtime_log_entry(
-                runtime_state& runtime, const backend::runtime_record_slot& slot) {
+                const backend::record_slot_header& header, std::string_view message) {
             auto rec = backend::log_entry{
                     .logger_name = {},
-                    .level = slot.level(),
-                    .source_location = slot.source_location(),
-                    .message = slot.message(),
-                    .timestamp = slot.header.timestamp,
+                    .level = backend::decode_level(header.level),
+                    .source_location =
+                            detail::source_loc{
+                                    .filename = header.source_file,
+                                    .line = header.source_line,
+                                    .function = nullptr,
+                            },
+                    .message = message,
+                    .timestamp = header.timestamp,
             };
 
-            if (auto* state = find_channel_state(runtime, slot.header.channel)) {
-                rec.logger_name = state->name;
+            if (header.route) {
+                rec.logger_name = header.route->name;
             }
 
             return rec;
         }
 
-        struct consumer_scratch {
-            std::vector<backend::line_cache_entry> line_cache;
-        };
-
-        static void rebuild_consumer_sinks_locked(runtime_state& runtime) {
-            runtime.consumer_sinks = make_consumer_sink_snapshot(runtime);
-        }
-
-        static std::shared_ptr<const consumer_sink_snapshot> sink_snapshot(runtime_state& runtime) {
-            std::lock_guard lock{runtime.runtime_mutex};
-            if (!runtime.consumer_sinks) {
-                rebuild_consumer_sinks_locked(runtime);
-            }
-
-            return runtime.consumer_sinks;
-        }
-
         template <bool NeedsWallClock, bool NeedsElapsed>
         static void emit_runtime_slot_for(
                 runtime_state& runtime,
-                const consumer_sink_snapshot& sinks,
                 consumer_scratch& scratch,
-                const backend::runtime_record_slot& slot) {
-            auto rec = make_runtime_log_entry(runtime, slot);
-            auto time_context =
-                    resolve_runtime_time_context<NeedsWallClock, NeedsElapsed>(rec.timestamp, runtime.clock_type);
-            auto& line_cache = scratch.line_cache;
-            line_cache.clear();
-            if (line_cache.capacity() < sinks.sinks.size()) {
-                line_cache.reserve(sinks.sinks.size());
-            }
+                const backend::record_slot_header& header,
+                std::string_view message) {
+            auto rec = make_runtime_log_entry(header, message);
+            auto time_context = resolve_runtime_time_context<NeedsWallClock, NeedsElapsed>(
+                    runtime, rec.timestamp, runtime.clock_type);
 
-            for (const auto& sink : sinks.sinks) {
-                auto line = backend::format_cache_line(
-                        line_cache,
-                        sink.pattern,
-                        sink.color,
-                        true,
-                        rec,
-                        time_context.tm,
-                        time_context.millis,
-                        time_context.elapsed);
-                sink.sink->write(line);
+            auto write = [&](const backend::sink_entry& sink) {
+                sink.sink->write(
+                        backend::render_pattern(
+                                sink,
+                                rec,
+                                time_context.tm,
+                                time_context.millis,
+                                time_context.elapsed(),
+                                &scratch,
+                                &resolve_cached_source_basename));
+            };
+
+            write(header.route->sink);
+            for (const auto& sink : runtime.custom_sinks) {
+                write(sink);
             }
         }
 
         static void emit_runtime_slot(
                 runtime_state& runtime,
-                const consumer_sink_snapshot& sinks,
                 consumer_scratch& scratch,
-                const backend::runtime_record_slot& slot) {
-            switch (sinks.time_requirements) {
+                const backend::record_slot_header& header,
+                std::string_view message) {
+            if (!header.route) {
+                return;
+            }
+
+            switch (header.route->sink.requirements | runtime.custom_sink_requirements) {
                 case backend::time_requirements::none:
-                    emit_runtime_slot_for<false, false>(runtime, sinks, scratch, slot);
+                    emit_runtime_slot_for<false, false>(runtime, scratch, header, message);
                     return;
                 case backend::time_requirements::wall_clock:
-                    emit_runtime_slot_for<true, false>(runtime, sinks, scratch, slot);
+                    emit_runtime_slot_for<true, false>(runtime, scratch, header, message);
                     return;
                 case backend::time_requirements::elapsed:
-                    emit_runtime_slot_for<false, true>(runtime, sinks, scratch, slot);
+                    emit_runtime_slot_for<false, true>(runtime, scratch, header, message);
                     return;
                 case backend::time_requirements::wall_clock_elapsed:
-                    emit_runtime_slot_for<true, true>(runtime, sinks, scratch, slot);
+                    emit_runtime_slot_for<true, true>(runtime, scratch, header, message);
                     return;
             }
         }
 
-        static size_t drain_runtime_queue_producer(
-                runtime_state& runtime,
-                const consumer_sink_snapshot& sinks,
-                consumer_scratch& scratch,
-                auto& producer) {
-            auto drained_total = size_t{0};
+        struct configured_drain_context {
+            runtime_state& runtime;
+            consumer_scratch& scratch;
+        };
 
-            for (;;) {
-                auto drained_pass = producer.queue().consume_all(
-                        [&](backend::runtime_record_slot& slot) { emit_runtime_slot(runtime, sinks, scratch, slot); });
-                drained_total += drained_pass;
-                if (drained_pass != 0) {
-                    continue;
-                }
-
-                producer.clear_enqueued();
-                if (!producer.queue().empty()) {
-                    if (producer.try_mark_enqueued()) {
-                        producer.publish_ready_bit();
-                    }
-                    continue;
-                }
-
-                return drained_total;
-            }
+        static void consume_configured_record(
+                void* context, const backend::record_slot_header& header, std::string_view message) {
+            auto& drain = *static_cast<configured_drain_context*>(context);
+            emit_runtime_slot(drain.runtime, drain.scratch, header, message);
         }
 
-        template <bool HugePages>
-        static size_t drain_threadsafe_registry_queues(
-                runtime_state& runtime, const consumer_sink_snapshot& sinks, consumer_scratch& scratch) {
-            auto& registry = producer_registry_slot<HugePages>(runtime);
-            auto* active_words_base = registry.active_words_base.load(std::memory_order_acquire);
-            auto* producers_base = registry.producers_base.load(std::memory_order_acquire);
-            if (!active_words_base || !producers_base) {
-                return 0;
-            }
-
-            auto drained_pass = size_t{0};
-            for (size_t word_index = 0; word_index < threadsafe_active_word_capacity; ++word_index) {
-                auto pending = active_words_base[word_index].get().bits.exchange(0, std::memory_order_acq_rel);
-                while (pending != 0) {
-                    auto bit_index = static_cast<size_t>(std::countr_zero(pending));
-                    auto producer_index = word_index * size_t{64} + bit_index;
-                    auto producer_count = registry.producer_count.load(std::memory_order_acquire);
-                    if (producer_index < producer_count) {
-                        drained_pass += drain_runtime_queue_producer(
-                                runtime, sinks, scratch, producers_base[producer_index]->get());
-                    }
-                    pending &= pending - uint64_t{1};
-                }
-            }
-
-            return drained_pass;
+        static bool drain_runtime_queues(runtime_state& runtime, consumer_scratch& scratch) {
+            auto context = configured_drain_context{runtime, scratch};
+            return runtime.producer_backend->drain_ready(&context, &consume_configured_record);
         }
 
-        static size_t drain_runtime_queues(runtime_state& runtime, consumer_scratch& scratch) {
-            auto drained_total = size_t{0};
+        static void drain_runtime_queues_until_idle(runtime_state& runtime, consumer_scratch& scratch) {
+            auto context = configured_drain_context{runtime, scratch};
+            runtime.producer_backend->drain_until_idle(&context, &consume_configured_record);
+        }
 
-            for (;;) {
-                auto sinks = sink_snapshot(runtime);
-                auto drained_pass = size_t{0};
-
-                if (runtime.single_threaded_producer_normal) {
-                    drained_pass += drain_runtime_queue_producer(
-                            runtime, *sinks, scratch, *runtime.single_threaded_producer_normal);
-                }
-
-                if (runtime.single_threaded_producer_huge) {
-                    drained_pass += drain_runtime_queue_producer(
-                            runtime, *sinks, scratch, *runtime.single_threaded_producer_huge);
-                }
-
-                drained_pass += drain_threadsafe_registry_queues<false>(runtime, *sinks, scratch);
-                drained_pass += drain_threadsafe_registry_queues<true>(runtime, *sinks, scratch);
-
-                if (drained_pass == 0) {
-                    return drained_total;
-                }
-
-                drained_total += drained_pass;
-            }
+        static void drain_flush_targets(runtime_state& runtime, consumer_scratch& scratch) {
+            auto context = configured_drain_context{runtime, scratch};
+            runtime.producer_backend->drain_flush(&context, &consume_configured_record);
         }
 
         static void flush_runtime_sinks(runtime_state& runtime) {
-            auto sinks = sink_snapshot(runtime);
-            for (const auto& sink : sinks->sinks) {
+            for (const auto& sink : runtime.configured_sinks) {
+                sink.sink->flush();
+            }
+            for (const auto& sink : runtime.custom_sinks) {
                 sink.sink->flush();
             }
         }
@@ -817,31 +505,34 @@ namespace un::log {
             auto scratch = consumer_scratch{};
 
             for (;;) {
-                drain_runtime_queues(runtime, scratch);
+                // Sample the wake ticket before any condition check: every waker mutates its
+                // condition first, then bumps wake_seq — so a wake landing after this load
+                // makes the wait below return immediately instead of sleeping through it.
+                auto seq = runtime.wake_seq.load(std::memory_order_acquire);
+
+                auto all_drained = drain_runtime_queues(runtime, scratch);
 
                 auto requested = runtime.flush_requested.load(std::memory_order_acquire);
                 if (requested != runtime.flush_completed.load(std::memory_order_acquire)) {
-                    drain_runtime_queues(runtime, scratch);
+                    drain_flush_targets(runtime, scratch);
                     flush_runtime_sinks(runtime);
                     runtime.flush_completed.store(requested, std::memory_order_release);
-                    runtime.consumer_cv.notify_all();
+                    runtime.flush_completed.notify_all();
                     continue;
                 }
 
-                std::unique_lock lock{runtime.runtime_mutex};
-                if (runtime.stop_requested) {
+                if (runtime.stop_requested.load(std::memory_order_acquire)) {
                     break;
                 }
 
-                runtime.consumer_cv.wait(lock, [&runtime] {
-                    return runtime.stop_requested ||
-                           runtime.flush_requested.load(std::memory_order_acquire) !=
-                                   runtime.flush_completed.load(std::memory_order_acquire) ||
-                           runtime_has_pending_work(runtime);
-                });
+                if (!all_drained) {
+                    continue;
+                }
+
+                runtime.wake_seq.wait(seq, std::memory_order_acquire);
             }
 
-            drain_runtime_queues(runtime, scratch);
+            drain_runtime_queues_until_idle(runtime, scratch);
             flush_runtime_sinks(runtime);
         }
 
@@ -850,47 +541,16 @@ namespace un::log {
                 return;
             }
 
-            runtime.stop_requested = false;
+            runtime.stop_requested.store(false, std::memory_order_relaxed);
             // std::thread stores args by value after decay, so use std::ref
             runtime.consumer_thread = std::thread{consumer_main, std::ref(runtime)};
             runtime.consumer_started = true;
         }
 
-        static void ensure_runtime_initialized_locked(runtime_state& st, const channel_registration& registration) {
-            ensure_global_config_locked(st);
-            ensure_consumer_started_locked(st);
-
-            if (registration.runtime_mode == RuntimeMode::threadsafe) {
-                if (registration.huge_pages) {
-                    std::ignore = ensure_threadsafe_runtime_queue_producer<true>(st);
-                }
-                else {
-                    std::ignore = ensure_threadsafe_runtime_queue_producer<false>(st);
-                }
-            }
-        }
-
-        void notify_runtime_work_available() noexcept {
-            if (auto* st = try_access_state()) {
-                st->consumer_cv.notify_one();
-            }
-        }
-
-        void mark_runtime_active_after_commit() noexcept {
-            if (auto* st = try_access_state()) {
-                auto expected = false;
-                if (st->is_active.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
-                    st->consumer_cv.notify_one();
-                }
-            }
-        }
-
-        static channel_handle make_channel_route_locked(runtime_state& st, channel_registration registration) {
-
-            if (st.is_active.load(std::memory_order_relaxed)) {
-                throw std::invalid_argument{"runtime is active; cannot register new channels"};
-            }
-
+        static channel_handle make_channel_route_locked(
+                runtime_state& st,
+                backend::runtime_producer_backend& producer_backend,
+                channel_registration registration) {
             auto channel_name = std::string{registration.name};
             if (st.channel_ids.contains(channel_name)) {
                 throw std::invalid_argument{"A channel with the name {} already exists"_format(registration.name)};
@@ -900,126 +560,190 @@ namespace un::log {
                 throw std::length_error{"channel registry exhausted"};
             }
 
-            if (registration.max_message_size > backend::runtime_record_slot::payload_capacity) {
-                throw std::invalid_argument{"channel message limit exceeds runtime queue slot payload capacity"};
-            }
-
-            set_runtime_clock_type(st, registration.timestamp_mode);
-            add_configured_sink_locked(st, registration);
+            auto sink = configured_sink_for_locked(st, registration);
 
             auto id = static_cast<channel_id>(st.channels.size());
-            st.channels.emplace_back(std::move(channel_name), registration.max_message_size);
+            st.channels.emplace_back(id, std::move(channel_name));
 
             auto& state = st.channels.back();
-            state.set_level(st.current_level);
+            state.configure_level(st.global_level.load(std::memory_order_relaxed));
+            state.sink = backend::sink_entry{
+                    .sink = std::move(sink),
+                    .pattern = registration.pattern,
+                    .render_buffer = {},
+                    .color = registration.color,
+                    .requirements = registration.time_requirements,
+            };
             st.channel_ids.emplace(state.name, id);
 
-            if (registration.runtime_mode == RuntimeMode::threadsafe) {
-                if (registration.huge_pages) {
-                    ++st.threadsafe_huge_channel_count;
-                }
-                else {
-                    ++st.threadsafe_normal_channel_count;
-                }
-            }
+            producer_backend.register_channel(registration.runtime_mode, registration.huge_pages);
 
-            ensure_runtime_initialized_locked(st, registration);
-            return channel_handle{id, state.name, state.max_message_size};
+            return channel_handle{&state};
         }
 
-        log_level get_current_level() {
+        log_level get_global_level(backend::runtime_producer_backend& producer_backend) {
             if (auto* st = try_access_state()) {
-                return st->current_level;
+                if (st->producer_backend != &producer_backend) {
+                    throw std::invalid_argument{"level query uses a different compile-time global configuration"};
+                }
+                return st->global_level.load(std::memory_order_relaxed);
             }
 
             return log_level::info;
         }
 
-        void set_current_level(log_level level) {
+        void set_global_level(backend::runtime_producer_backend& producer_backend, log_level level) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
             register_process_exit_hook_locked(control);
+            if (st.producer_backend != &producer_backend) {
+                throw std::invalid_argument{"level update uses a different compile-time global configuration"};
+            }
 
-            st.current_level = level;
+            st.global_level.store(level, std::memory_order_relaxed);
 
+            auto running = control.lifecycle.load(std::memory_order_relaxed) == runtime_lifecycle::running;
             for (auto& route : st.channels) {
-                route.set_level(level);
+                if (running) {
+                    route.set_running_level(level);
+                }
+                else {
+                    route.configure_level(level);
+                }
             }
         }
 
-        channel_handle make_channel_route(channel_registration registration) {
+        void set_route_level(
+                backend::runtime_producer_backend& producer_backend, route_state& route, log_level level) noexcept {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
-            auto& st = ensure_state_created_locked(control);
-            register_process_exit_hook_locked(control);
-            return make_channel_route_locked(st, std::move(registration));
+            auto* st = control.state.load(std::memory_order_acquire);
+            if (!st || st->producer_backend != &producer_backend) {
+                return;
+            }
+
+            if (control.lifecycle.load(std::memory_order_relaxed) == runtime_lifecycle::running) {
+                route.set_running_level(level);
+            }
+            else {
+                route.configure_level(level);
+            }
         }
 
-        void add_sink_route(ClockType timestamp_mode, backend::sink_entry entry) {
+        channel_handle make_channel_route(
+                backend::runtime_producer_backend& producer_backend, channel_registration registration) {
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
+            if (control.lifecycle.load(std::memory_order_acquire) != runtime_lifecycle::configuring) {
+                throw std::invalid_argument{"runtime has started; cannot register new channels"};
+            }
+            if (st.producer_backend != &producer_backend) {
+                throw std::invalid_argument{"channel uses a different compile-time global configuration"};
+            }
+            return make_channel_route_locked(st, producer_backend, std::move(registration));
+        }
+
+        void add_sink_route(backend::runtime_producer_backend& producer_backend, backend::sink_entry entry) {
             auto& control = access_control();
             std::lock_guard lock{control.mutex};
             auto& st = ensure_state_created_locked(control);
             register_process_exit_hook_locked(control);
 
-            if (st.is_active.load(std::memory_order_relaxed)) {
-                throw std::invalid_argument{"runtime is active; cannot add sinks"};
+            if (control.lifecycle.load(std::memory_order_acquire) != runtime_lifecycle::configuring) {
+                throw std::invalid_argument{"runtime has started; cannot add sinks"};
+            }
+            if (st.producer_backend != &producer_backend) {
+                throw std::invalid_argument{"sink uses a different compile-time global configuration"};
             }
             if (!entry.sink) {
                 throw std::invalid_argument{"add_sink requires a non-null sink"};
             }
 
-            ensure_global_config_locked(st);
-            set_runtime_clock_type(st, timestamp_mode);
-
-            std::lock_guard runtime_lock{st.runtime_mutex};
+            st.custom_sink_requirements |= entry.requirements;
             st.custom_sinks.push_back(std::move(entry));
-            rebuild_consumer_sinks_locked(st);
         }
 
-        void flush_backend() {
-            auto* st = try_access_state();
-            if (!st || !st->consumer_started) {
+        void start_backend(backend::runtime_producer_backend& producer_backend) {
+            auto& control = access_control();
+            std::lock_guard lock{control.mutex};
+            auto& st = ensure_state_created_locked(control);
+            register_process_exit_hook_locked(control);
+
+            auto lifecycle = control.lifecycle.load(std::memory_order_acquire);
+            if (lifecycle == runtime_lifecycle::running) {
+                return;
+            }
+            if (lifecycle != runtime_lifecycle::configuring) {
+                throw std::invalid_argument{"runtime cannot be started in its current state"};
+            }
+            if (st.channels.empty()) {
+                throw std::invalid_argument{"runtime requires at least one channel before start"};
+            }
+            if (st.producer_backend != &producer_backend) {
+                throw std::invalid_argument{"start uses a different compile-time global configuration"};
+            }
+
+            producer_backend.prepare_start();
+
+            for (auto& route : st.channels) {
+                route.activate();
+            }
+
+            ensure_consumer_started_locked(st);
+            control.lifecycle.store(runtime_lifecycle::running, std::memory_order_release);
+        }
+
+        void flush_backend(backend::runtime_producer_backend& producer_backend) {
+            auto& control = access_control();
+            auto* st = control.state.load(std::memory_order_acquire);
+            if (!st || st->producer_backend != &producer_backend) {
                 return;
             }
 
-            auto target = st->flush_requested.fetch_add(1, std::memory_order_acq_rel) + 1u;
-            st->consumer_cv.notify_one();
+            st->active_flushers.fetch_add(1, std::memory_order_acq_rel);
+            if (control.lifecycle.load(std::memory_order_acquire) != runtime_lifecycle::running) {
+                if (st->active_flushers.fetch_sub(1, std::memory_order_release) == 1) {
+                    st->active_flushers.notify_all();
+                }
+                return;
+            }
 
-            std::unique_lock lock{st->runtime_mutex};
-            st->consumer_cv.wait(
-                    lock, [st, target] { return st->flush_completed.load(std::memory_order_acquire) >= target; });
+            if (st->consumer_thread.get_id() == std::this_thread::get_id()) {
+                if (st->active_flushers.fetch_sub(1, std::memory_order_release) == 1) {
+                    st->active_flushers.notify_all();
+                }
+                throw std::logic_error{"flush cannot be called from the consumer thread"};
+            }
+            auto target = st->flush_requested.fetch_add(1, std::memory_order_relaxed) + 1u;
+            wake_consumer(*st);
+
+            for (auto completed = st->flush_completed.load(std::memory_order_acquire); completed < target;
+                 completed = st->flush_completed.load(std::memory_order_acquire)) {
+                st->flush_completed.wait(completed, std::memory_order_acquire);
+            }
+            if (st->active_flushers.fetch_sub(1, std::memory_order_release) == 1) {
+                st->active_flushers.notify_all();
+            }
         }
 
 #if UNLOG_DIAGNOSTIC
-        backend::producer_stats backend_stats() {
-            auto out = backend::producer_stats{};
-            auto snapshots = runtime_queue_producer_snapshot();
-            for (const auto& snapshot : snapshots) {
-                out.emitted += snapshot.emitted;
-                out.dropped += snapshot.dropped;
-                out.truncated += snapshot.truncated;
-            }
-            return out;
+        backend::producer_stats backend_stats(backend::runtime_producer_backend& producer_backend) {
+            return producer_backend.stats();
         }
 #endif
 
-        void set_channel_level(channel_id id, log_level level) noexcept {
-            if (auto* st = try_access_state()) {
-                if (auto* state = find_channel_state(*st, id)) {
-                    state->set_level(level);
-                }
+        void prewarm_backend(backend::runtime_producer_backend& producer_backend) {
+            auto& control = access_control();
+            if (control.lifecycle.load(std::memory_order_acquire) != runtime_lifecycle::running) {
+                return;
             }
-        }
-
-        log_level channel_level(channel_id id) noexcept {
-            if (auto* st = try_access_state()) {
-                if (auto* state = find_channel_state(*st, id)) {
-                    return state->level();
-                }
+            if (auto* st = control.state.load(std::memory_order_acquire);
+                st && st->producer_backend == &producer_backend) {
+                producer_backend.prewarm_thread();
             }
-
-            return log_level::off;
         }
 
     }  // namespace detail
@@ -1035,13 +759,7 @@ namespace un::log {
                 return;
             }
 
-            auto ready = st->consumer_started || !st->channels.empty();
-            if (!ready) {
-                std::lock_guard lock{st->runtime_mutex};
-                ready = !st->configured_sinks.empty() || !st->custom_sinks.empty();
-            }
-
-            if (!ready) {
+            if (!st->consumer_started) {
                 return;
             }
 
@@ -1062,62 +780,12 @@ namespace un::log {
 
         size_t threadsafe_producer_count() {
             auto* st = detail::try_access_state();
-            if (!st) {
+            if (!st || !st->producer_backend) {
                 return 0;
             }
 
-            return st->producer_registry_normal.producer_count.load(std::memory_order_acquire) +
-                   st->producer_registry_huge.producer_count.load(std::memory_order_acquire);
+            return st->producer_backend->producer_count();
         }
     }  // namespace test
-
-    void set_global_config(global_config cfg) {
-        auto& control = detail::access_control();
-        std::lock_guard lock{control.mutex};
-        auto& st = detail::ensure_state_created_locked(control);
-        detail::register_process_exit_hook_locked(control);
-
-        if (st.global_config_locked || st.is_active.load(std::memory_order_relaxed)) {
-            throw std::invalid_argument{"global config is locked; cannot reconfigure"};
-        }
-
-        detail::validate_global_config(cfg);
-        st.global = cfg;
-        detail::reconfigure_runtime_queue_producers(st, cfg.thread_bufsize);
-    }
-
-    global_config get_global_config() {
-        if (auto* st = detail::try_access_state()) {
-            std::lock_guard lock{st->runtime_mutex};
-            return st->global;
-        }
-
-        return {};
-    }
-
-    void prewarm_thread() {
-        if (detail::runtime_is_shutting_down()) {
-            return;
-        }
-
-        auto& control = detail::access_control();
-        std::lock_guard lock{control.mutex};
-        auto* st = control.state.load(std::memory_order_acquire);
-        if (!st) {
-            return;
-        }
-
-        if (st->threadsafe_normal_channel_count != 0) {
-            std::ignore = detail::ensure_threadsafe_runtime_queue_producer<false>(*st);
-        }
-
-        if (st->threadsafe_huge_channel_count != 0) {
-            std::ignore = detail::ensure_threadsafe_runtime_queue_producer<true>(*st);
-        }
-    }
-
-    void flush() {
-        detail::flush_backend();
-    }
 
 }  // namespace un::log
